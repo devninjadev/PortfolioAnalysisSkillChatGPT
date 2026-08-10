@@ -1,0 +1,58 @@
+name: Release 0.9
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.event.head_commit.message == 'Publish evidence-first-portfolio-advisor 0.9'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build installation ZIP
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZIP_DEFLATED, ZipFile
+
+          output = Path("evidence-first-portfolio-advisor-0.9.zip")
+          roots = [
+              Path("SKILL.md"),
+              Path("agents"),
+              Path("assets"),
+              Path("references"),
+              Path("requirements.txt"),
+              Path("scripts"),
+              Path("tests"),
+          ]
+          files = []
+          for root in roots:
+              if root.is_file():
+                  files.append(root)
+              else:
+                  files.extend(path for path in root.rglob("*") if path.is_file())
+
+          with ZipFile(output, "w", ZIP_DEFLATED) as archive:
+              for path in sorted(files):
+                  archive.write(path, path.as_posix())
+          PY
+
+          unzip -l evidence-first-portfolio-advisor-0.9.zip
+          unzip -p evidence-first-portfolio-advisor-0.9.zip SKILL.md | head -n 8
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "0.9" \
+            evidence-first-portfolio-advisor-0.9.zip \
+            --target "${GITHUB_SHA}" \
+            --title "0.9" \
+            --notes "Initial public release of the Evidence-First Portfolio Advisor skill. Upload the ZIP directly to install it."
