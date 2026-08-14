@@ -16,6 +16,7 @@
 - FX and ticker candidate discovery have no fallback.
 - Fundamentals and news may fall back to web search, but search snippets are discovery-only and source pages must be opened.
 - No Alpaca REST client, Alpaca credential, guessed MCP URL, ticker alias parser, suffix parser, or country allowlist may be added.
+- If an eligible Alpaca fallback is needed and the plugin is unavailable, recommend connecting it and state that no separate signup is required.
 - Missing assets, FX, corporate actions, or source evidence never produce portfolio weights.
 - Existing `portfolio` CLI behavior remains backward compatible.
 - Every production behavior is introduced by a failing test and verified green before the next behavior.
@@ -455,6 +456,8 @@ Add the ordered workflow:
 6. If Alpaca is unavailable, unsupported, ambiguous, or incomplete, stop the affected analysis.
 7. For fundamentals/news failure, search and open source documents; never rely on snippets.
 
+For an unavailable Alpaca tool, use this Korean user-facing meaning without claiming that a call occurred: `미국 주식·크립토 가격 폴백에는 Alpaca 플러그인을 사용할 수 있습니다. 별도 회원가입은 필요 없고, 플러그인을 연결하기만 하면 됩니다.` Emit `alpaca_plugin_unavailable` in the structured limitation receipt.
+
 - [ ] **Step 3: Update references and metadata**
 
 Document payload schemas, adjustment basis, errors, receipt fields, web source hierarchy, and the dated AAPL/BTC/005930.KS live evidence. In `agents/openai.yaml`, mention Alpaca as an optional installed fallback capability in user-facing metadata only if the schema supports it. Do not add a fabricated `dependencies.tools` URL.
@@ -464,6 +467,8 @@ Document payload schemas, adjustment basis, errors, receipt fields, web source h
 Run the new `alpaca-validate` CLI with valid AAPL and BTC/USD fixture envelopes and an unsupported 005930.KS envelope. Confirm the first two return provider receipts and the Korean envelope returns `fallback_not_supported`. Run a malformed or missing Alpaca input and confirm no price claim or weights are emitted.
 
 Review the web-fallback instructions against the Yahoo fundamentals/news failure scenarios and confirm the required output shape includes source URL, retrieval time, source role, period/as-of date where applicable, and unresolved `null` fields. Because prose instructions are not executable production code, validate their structure with the available OpenAI skill validator rather than a source-text unit test.
+
+Review the missing-plugin scenario separately: the recommendation appears for an eligible U.S. equity or crypto fallback, does not appear for a Korean or ambiguous asset, says no separate signup is required, and does not claim that Alpaca data was retrieved.
 
 Run: `python3 -m unittest discover -s tests -v`
 

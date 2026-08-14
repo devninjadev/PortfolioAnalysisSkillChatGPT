@@ -228,6 +228,7 @@ Add these data-gate errors:
 - `fallback_not_supported`
 - `fallback_class_ambiguous`
 - `alpaca_asset_not_found`
+- `alpaca_plugin_unavailable`
 - `alpaca_history_unavailable`
 - `alpaca_history_incomplete`
 - `alpaca_schema_error`
@@ -249,6 +250,8 @@ Update:
 - `agents/openai.yaml` to state that the installed Alpaca plugin is required for the fallback path, without embedding credentials or pretending the skill owns Alpaca's MCP server.
 
 If the current OpenAI metadata schema cannot express a dependency on a separately installed curated plugin, document that Alpaca must be installed and fail clearly when its tools are unavailable. Do not invent an MCP URL.
+
+When an eligible U.S. equity or crypto fallback is needed but the Alpaca tools are unavailable, stop only the affected analysis and recommend connecting the Alpaca plugin. The user-facing message must explain that no separate Alpaca signup is required and connecting the plugin is sufficient. Do not attempt installation or imply that a fallback was executed.
 
 ## Test Strategy
 
@@ -317,3 +320,4 @@ The work is accepted only when:
 6. Yahoo fundamentals/news failures route to web discovery with opened-source verification requirements.
 7. Every output preserves provider, time, coverage, adjustment, missingness, and primary-error receipts.
 8. The release-ready ZIP has the correct root and contains no runtime caches or test artifacts.
+9. A missing Alpaca plugin produces the no-signup connection recommendation only when an eligible fallback is actually needed.
