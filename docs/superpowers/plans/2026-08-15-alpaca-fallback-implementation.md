@@ -456,7 +456,7 @@ Add the ordered workflow:
 6. If Alpaca is unavailable, unsupported, ambiguous, or incomplete, stop the affected analysis.
 7. For fundamentals/news failure, search and open source documents; never rely on snippets.
 
-For an unavailable Alpaca tool, use this Korean user-facing meaning without claiming that a call occurred: `미국 주식·크립토 가격 폴백에는 Alpaca 플러그인을 사용할 수 있습니다. 별도 회원가입은 필요 없고, 플러그인을 연결하기만 하면 됩니다.` Emit `alpaca_plugin_unavailable` in the structured limitation receipt.
+For an unavailable Alpaca tool, use this Korean user-facing meaning without claiming that a call occurred: `미국 주식·크립토 가격의 대안 출처로 Alpaca 플러그인을 사용할 수 있습니다. 별도 회원가입은 필요 없고, 플러그인을 연결하기만 하면 됩니다.` Emit `alpaca_plugin_unavailable` in the structured limitation receipt.
 
 - [ ] **Step 3: Update references and metadata**
 
