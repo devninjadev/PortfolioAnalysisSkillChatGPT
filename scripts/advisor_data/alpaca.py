@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import math
 from typing import Any, Mapping
@@ -105,7 +105,7 @@ def _parse_bars(
     *,
     provider_symbol: str,
     expected_tool: str,
-) -> tuple[pd.Series, Mapping[str, Any]]:
+) -> tuple[pd.Series, Mapping[str, Any], int]:
     payload = _plugin_payload(value, "bars response")
     if str(payload.get("tool") or "") != expected_tool:
         raise DataGateError(
@@ -132,6 +132,7 @@ def _parse_bars(
         )
 
     observations: dict[pd.Timestamp, float] = {}
+    duplicate_count = 0
     for position, raw_bar in enumerate(raw_bars):
         item = _mapping(raw_bar, f"bar {position}")
         if str(item.get("symbol") or "") != provider_symbol:
@@ -170,17 +171,181 @@ def _parse_bars(
                 "Alpaca returned a non-positive or non-finite close.",
                 {"position": position, "close": item.get("close")},
             )
-        if timestamp in observations and observations[timestamp] != close:
-            raise DataGateError(
-                "alpaca_schema_error",
-                "Alpaca returned conflicting bars at the same timestamp.",
-                {"timestamp": timestamp.isoformat()},
-            )
+        if timestamp in observations:
+            if observations[timestamp] != close:
+                raise DataGateError(
+                    "alpaca_schema_error",
+                    "Alpaca returned conflicting bars at the same timestamp.",
+                    {"timestamp": timestamp.isoformat()},
+                )
+            duplicate_count += 1
         observations[timestamp] = close
 
     series = pd.Series(observations, dtype=float).sort_index()
     series.index = pd.DatetimeIndex(series.index)
-    return series, request
+    if len(series) < 2:
+        raise DataGateError(
+            "alpaca_history_incomplete",
+            f"Alpaca returned fewer than two observations for {provider_symbol}.",
+            {"observation_count": len(series)},
+        )
+    return series, request, duplicate_count
+
+
+def _utc_timestamp(value: Any, label: str) -> pd.Timestamp:
+    try:
+        timestamp = pd.Timestamp(value)
+        if timestamp.tzinfo is None:
+            return timestamp.tz_localize("UTC")
+        return timestamp.tz_convert("UTC")
+    except Exception as exc:
+        raise DataGateError(
+            "corporate_action_adjustment_failed",
+            f"Alpaca returned an invalid {label}.",
+            {"value": value, "error_type": exc.__class__.__name__},
+        ) from exc
+
+
+def _action_items(
+    announcements: Mapping[str, Any],
+    key: str,
+) -> list[Mapping[str, Any]]:
+    value = announcements.get(key, [])
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise DataGateError(
+            "corporate_action_adjustment_failed",
+            f"Alpaca {key} announcements must be a list.",
+        )
+    return [_mapping(item, f"{key} announcement") for item in value]
+
+
+def _adjust_stock_close(
+    series: pd.Series,
+    actions_payload: Mapping[str, Any],
+    provider_symbol: str,
+    timeframe: str,
+) -> tuple[pd.Series, list[dict[str, Any]]]:
+    announcements = _mapping(
+        actions_payload.get("announcements", {}),
+        "corporate action announcements",
+    )
+    actions: list[tuple[pd.Timestamp, str, Mapping[str, Any]]] = []
+    for key in ("forward_splits", "reverse_splits"):
+        for item in _action_items(announcements, key):
+            actions.append((_utc_timestamp(item.get("ex_date"), "split ex-date"), key, item))
+    for item in _action_items(announcements, "cash_dividends"):
+        actions.append((_utc_timestamp(item.get("ex_date"), "dividend ex-date"), "cash_dividend", item))
+    actions.sort(key=lambda action: action[0])
+
+    adjusted = series.astype(float).copy()
+    applied: list[dict[str, Any]] = []
+    for ex_date, action_type, item in actions:
+        if str(item.get("symbol") or "") != provider_symbol:
+            raise DataGateError(
+                "corporate_action_adjustment_failed",
+                "Alpaca corporate action symbol does not match the requested asset.",
+                {
+                    "provider_symbol": provider_symbol,
+                    "returned_symbol": item.get("symbol"),
+                    "action_type": action_type,
+                },
+            )
+        if action_type in {"forward_splits", "reverse_splits"}:
+            try:
+                old_rate = float(item.get("old_rate"))
+                new_rate = float(item.get("new_rate"))
+            except (TypeError, ValueError) as exc:
+                raise DataGateError(
+                    "corporate_action_adjustment_failed",
+                    "Alpaca split rates must be numeric.",
+                    {"ex_date": ex_date.date().isoformat()},
+                ) from exc
+            factor = old_rate / new_rate if new_rate else float("nan")
+            if not math.isfinite(factor) or factor <= 0:
+                raise DataGateError(
+                    "corporate_action_adjustment_failed",
+                    "Alpaca split rates produced an invalid adjustment factor.",
+                    {
+                        "old_rate": item.get("old_rate"),
+                        "new_rate": item.get("new_rate"),
+                        "ex_date": ex_date.date().isoformat(),
+                    },
+                )
+            adjusted.loc[adjusted.index < ex_date] *= factor
+        else:
+            try:
+                rate = float(item.get("rate"))
+            except (TypeError, ValueError) as exc:
+                raise DataGateError(
+                    "corporate_action_adjustment_failed",
+                    "Alpaca cash dividend rate must be numeric.",
+                    {"ex_date": ex_date.date().isoformat()},
+                ) from exc
+            if not math.isfinite(rate) or rate < 0:
+                raise DataGateError(
+                    "corporate_action_adjustment_failed",
+                    "Alpaca cash dividend rate is invalid.",
+                    {"rate": item.get("rate"), "ex_date": ex_date.date().isoformat()},
+                )
+            boundary = ex_date
+            if str(timeframe).lower() in {"1week", "1w"}:
+                boundary = ex_date - pd.Timedelta(days=ex_date.weekday())
+            prior = adjusted.loc[adjusted.index < boundary]
+            if prior.empty:
+                raise DataGateError(
+                    "corporate_action_adjustment_failed",
+                    "No complete pre-ex-date bar is available for a cash dividend.",
+                    {"ex_date": ex_date.date().isoformat(), "timeframe": timeframe},
+                )
+            pre_close = float(prior.iloc[-1])
+            factor = (pre_close - rate) / pre_close
+            if not math.isfinite(factor) or factor <= 0 or factor > 1:
+                raise DataGateError(
+                    "corporate_action_adjustment_failed",
+                    "Alpaca cash dividend produced an invalid adjustment factor.",
+                    {
+                        "rate": rate,
+                        "pre_close": pre_close,
+                        "ex_date": ex_date.date().isoformat(),
+                    },
+                )
+            adjusted.loc[adjusted.index < boundary] *= factor
+        applied.append(
+            {
+                "type": (
+                    "cash_dividend"
+                    if action_type == "cash_dividend"
+                    else action_type.removesuffix("s")
+                ),
+                "ex_date": ex_date.date().isoformat(),
+                "factor": factor,
+                "status": "applied",
+            }
+        )
+    return adjusted, applied
+
+
+def _coverage_receipt(
+    series: pd.Series,
+    *,
+    start: str,
+    end: str | None,
+    timeframe: str,
+) -> tuple[str, list[str]]:
+    requested_start = _utc_timestamp(start, "requested start")
+    requested_end = _utc_timestamp(end, "requested end") if end else None
+    tolerance = timedelta(days=8 if str(timeframe).lower() in {"1week", "1w"} else 2)
+    gaps: list[str] = []
+    if series.index.min().to_pydatetime() > (requested_start.to_pydatetime() + tolerance):
+        gaps.append("starts_after_requested_start")
+    if (
+        requested_end is not None
+        and series.index.max().to_pydatetime() < (requested_end.to_pydatetime() - tolerance)
+    ):
+        gaps.append("ends_before_requested_end")
+    return ("clipped" if gaps else "complete"), gaps
 
 
 def normalize_alpaca_envelope(
@@ -216,14 +381,33 @@ def normalize_alpaca_envelope(
                 "corporate_actions_unavailable",
                 f"Alpaca corporate actions are required for {provider_symbol}.",
             )
-        _plugin_payload(source["corporate_actions_response"], "corporate actions response")
+        actions_payload = _plugin_payload(
+            source["corporate_actions_response"],
+            "corporate actions response",
+        )
+    else:
+        actions_payload = {}
 
-    series, request = _parse_bars(
+    series, request, duplicate_count = _parse_bars(
         source.get("bars_response"),
         provider_symbol=provider_symbol,
         expected_tool=expected_tool,
     )
+    applied_actions: list[dict[str, Any]] = []
+    if fallback_class == "us_equity":
+        series, applied_actions = _adjust_stock_close(
+            series,
+            actions_payload,
+            provider_symbol,
+            str(request.get("timeframe") or ""),
+        )
     series.name = symbol
+    coverage_status, coverage_gaps = _coverage_receipt(
+        series,
+        start=start,
+        end=end,
+        timeframe=str(request.get("timeframe") or ""),
+    )
     retrieved_at = datetime.now(timezone.utc).isoformat()
     receipt: dict[str, Any] = {
         "provider": "alpaca",
@@ -238,17 +422,25 @@ def normalize_alpaca_envelope(
         "alpaca_feed": request.get("feed"),
         "bar_timeframe": request.get("timeframe"),
         "currency": "USD",
-        "price_basis": "raw_crypto_close" if fallback_class == "crypto" else "raw_stock_close",
-        "raw_observation_count": len(series),
+        "price_basis": (
+            "raw_crypto_close"
+            if fallback_class == "crypto"
+            else "corporate_action_adjusted_close"
+        ),
+        "raw_observation_count": len(series) + duplicate_count,
         "normalized_observation_count": len(series),
+        "duplicate_observation_count": duplicate_count,
         "first_at": series.index.min().isoformat(),
         "last_at": series.index.max().isoformat(),
+        "coverage_status": coverage_status,
+        "coverage_gaps": coverage_gaps,
         "requested_start": start,
         "requested_end": end,
         "retrieved_at": retrieved_at,
     }
     if asset_receipt is not None:
         receipt["asset"] = asset_receipt
+        receipt["corporate_actions_applied"] = applied_actions
     return AlpacaHistory(series=series, currency="USD", receipt=receipt)
 
 

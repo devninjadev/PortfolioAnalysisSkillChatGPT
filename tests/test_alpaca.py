@@ -185,6 +185,124 @@ class AlpacaEnvelopeTests(unittest.TestCase):
         with self.assertRaisesRegex(DataGateError, "alpaca_asset_not_found"):
             normalize_alpaca_envelope(envelope, "2026-01-01", None)
 
+    def test_four_for_one_split_removes_false_seventy_five_percent_return(self) -> None:
+        result = normalize_alpaca_envelope(
+            stock_envelope(
+                bars=[
+                    bar("AAPL", "2020-08-24T04:00:00+00:00", 499.345),
+                    bar("AAPL", "2020-08-31T04:00:00+00:00", 121.11),
+                ],
+                actions={
+                    "announcements": {
+                        "forward_splits": [
+                            {
+                                "symbol": "AAPL",
+                                "old_rate": 1.0,
+                                "new_rate": 4.0,
+                                "ex_date": "2020-08-31",
+                            }
+                        ]
+                    }
+                },
+            ),
+            start="2020-08-01",
+            end="2020-09-10",
+        )
+
+        split_return = result.series.pct_change().dropna().iloc[0]
+        self.assertGreater(split_return, -0.10)
+        self.assertEqual(
+            result.receipt["corporate_actions_applied"][0]["factor"],
+            0.25,
+        )
+        self.assertEqual(result.receipt["price_basis"], "corporate_action_adjusted_close")
+
+    def test_cash_dividend_adjusts_prior_bar_with_declared_factor(self) -> None:
+        result = normalize_alpaca_envelope(
+            stock_envelope(
+                bars=[
+                    bar("AAPL", "2026-01-05T05:00:00+00:00", 100.0),
+                    bar("AAPL", "2026-01-12T05:00:00+00:00", 100.0),
+                ],
+                actions={
+                    "announcements": {
+                        "cash_dividends": [
+                            {
+                                "symbol": "AAPL",
+                                "rate": 1.0,
+                                "ex_date": "2026-01-12",
+                            }
+                        ]
+                    }
+                },
+            ),
+            start="2026-01-01",
+            end="2026-01-20",
+        )
+
+        self.assertAlmostEqual(result.series.iloc[0], 99.0)
+        self.assertAlmostEqual(result.series.iloc[1], 100.0)
+        self.assertEqual(
+            result.receipt["corporate_actions_applied"][0]["type"],
+            "cash_dividend",
+        )
+
+    def test_conflicting_duplicate_bars_are_rejected(self) -> None:
+        with self.assertRaisesRegex(DataGateError, "conflicting bars"):
+            normalize_alpaca_envelope(
+                crypto_envelope(
+                    bars=[
+                        bar("BTC/USD", "2026-01-05T00:00:00+00:00", 90000.0),
+                        bar("BTC/USD", "2026-01-05T00:00:00+00:00", 91000.0),
+                    ],
+                ),
+                "2026-01-01",
+                None,
+            )
+
+    def test_identical_duplicate_bars_collapse_to_one_observation(self) -> None:
+        result = normalize_alpaca_envelope(
+            crypto_envelope(
+                bars=[
+                    bar("BTC/USD", "2026-01-05T00:00:00+00:00", 90000.0),
+                    bar("BTC/USD", "2026-01-05T00:00:00+00:00", 90000.0),
+                    bar("BTC/USD", "2026-01-12T00:00:00+00:00", 91000.0),
+                ],
+            ),
+            "2026-01-01",
+            None,
+        )
+
+        self.assertEqual(result.series.tolist(), [90000.0, 91000.0])
+        self.assertEqual(result.receipt["duplicate_observation_count"], 1)
+
+    def test_single_observation_is_incomplete_history(self) -> None:
+        with self.assertRaisesRegex(DataGateError, "alpaca_history_incomplete"):
+            normalize_alpaca_envelope(
+                crypto_envelope(
+                    bars=[
+                        bar("BTC/USD", "2026-01-05T00:00:00+00:00", 90000.0),
+                    ],
+                ),
+                "2026-01-01",
+                None,
+            )
+
+    def test_late_first_observation_records_clipped_coverage(self) -> None:
+        result = normalize_alpaca_envelope(
+            crypto_envelope(
+                bars=[
+                    bar("BTC/USD", "2026-02-02T00:00:00+00:00", 90000.0),
+                    bar("BTC/USD", "2026-02-09T00:00:00+00:00", 91000.0),
+                ],
+            ),
+            "2026-01-01",
+            "2026-02-15",
+        )
+
+        self.assertEqual(result.receipt["coverage_status"], "clipped")
+        self.assertEqual(result.receipt["coverage_gaps"], ["starts_after_requested_start"])
+
 
 if __name__ == "__main__":
     unittest.main()
