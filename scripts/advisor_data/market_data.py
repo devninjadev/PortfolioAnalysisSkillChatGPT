@@ -117,6 +117,37 @@ def _download_usd_per_currency(
     )
 
 
+def download_currency_bridge(
+    currency: str,
+    start: str,
+    end: str | None,
+    downloader: Any = yf.download,
+) -> tuple[pd.Series, dict[str, str]]:
+    """Download one non-USD currency's USD value independently of asset prices."""
+
+    major, scale, _ = _currency_spec(currency)
+    if scale != 1.0 or major == "USD":
+        raise DataGateError(
+            "unsupported_currency",
+            "A Yahoo currency bridge requires a non-USD major currency.",
+            {"currency": currency},
+        )
+    options = {
+        "start": start,
+        "end": end,
+        "interval": "1d",
+        "auto_adjust": False,
+        "actions": False,
+        "repair": False,
+        "keepna": True,
+        "progress": False,
+        "threads": True,
+        "group_by": "column",
+        "multi_level_index": True,
+    }
+    return _download_usd_per_currency(major, downloader, options)
+
+
 def download_market_bundle(
     symbols: list[str],
     start: str,
@@ -387,4 +418,10 @@ def build_return_matrix(
     return ReturnMatrixResult(returns=returns, normalized_prices=sampled, receipt=receipt)
 
 
-__all__ = ["MarketBundle", "ReturnMatrixResult", "build_return_matrix", "download_market_bundle"]
+__all__ = [
+    "MarketBundle",
+    "ReturnMatrixResult",
+    "build_return_matrix",
+    "download_currency_bridge",
+    "download_market_bundle",
+]

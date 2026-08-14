@@ -11,7 +11,11 @@ SKILL_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 
 from advisor_data import DataGateError  # noqa: E402
-from advisor_data.market_data import build_return_matrix, download_market_bundle  # noqa: E402
+from advisor_data.market_data import (  # noqa: E402
+    build_return_matrix,
+    download_currency_bridge,
+    download_market_bundle,
+)
 
 
 class MarketDataTests(unittest.TestCase):
@@ -243,6 +247,29 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(calls, [True, False])
         self.assertFalse(bundle.receipt["repair_used"])
         self.assertEqual(bundle.receipt["repair_fallback_error_type"], "ValueError")
+
+    def test_currency_bridge_uses_direct_yahoo_pair(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        def downloader(**kwargs: object) -> pd.DataFrame:
+            calls.append(dict(kwargs))
+            return pd.DataFrame(
+                {"Close": [0.00075, 0.00076]},
+                index=self.index[:2],
+            )
+
+        series, receipt = download_currency_bridge(
+            "KRW",
+            start="2026-01-01",
+            end="2026-02-01",
+            downloader=downloader,
+        )
+
+        self.assertEqual(calls[0]["tickers"], "KRWUSD=X")
+        self.assertFalse(calls[0]["auto_adjust"])
+        self.assertFalse(calls[0]["actions"])
+        self.assertEqual(series.name, "KRWUSD=X")
+        self.assertEqual(receipt["orientation"], "USD_per_currency_unit")
 
 
 if __name__ == "__main__":
