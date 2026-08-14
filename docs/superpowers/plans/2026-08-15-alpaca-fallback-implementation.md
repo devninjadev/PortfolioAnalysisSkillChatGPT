@@ -31,7 +31,6 @@
 - Create `tests/test_alpaca.py`: adapter and corporate-action behavior.
 - Create `tests/test_evidence_workspace.py`: preparation, persistence, mixed-provider merge, unsupported markets, and FX gates.
 - Modify `tests/test_cli.py`: end-to-end CLI contracts.
-- Create `tests/test_skill_contract.py`: provider order, tool availability, and verified web-search instructions.
 - Modify `SKILL.md`, `agents/openai.yaml`, `references/data-contract.md`, `references/methodology.md`, and `references/market-coverage.md`: user-visible workflow contract.
 
 ---
@@ -422,7 +421,6 @@ git commit -m "Expose Alpaca fallback CLI workflow"
 ### Task 5: Update the skill workflow and web-evidence contract
 
 **Files:**
-- Create: `tests/test_skill_contract.py`
 - Modify: `SKILL.md`
 - Modify: `agents/openai.yaml`
 - Modify: `references/data-contract.md`
@@ -434,32 +432,18 @@ git commit -m "Expose Alpaca fallback CLI workflow"
 - Produces: source roles `discovery_only`, `publisher_verified`, and `primary_verified`.
 - Produces: a clear missing-plugin stop condition without an invented tool response.
 
-- [ ] **Step 1: Write failing skill-contract tests**
+- [ ] **Step 1: Record the baseline workflow failure**
 
-```python
-class SkillContractTests(unittest.TestCase):
-    def test_yahoo_precedes_alpaca_and_web_fallbacks(self) -> None:
-        text = (ROOT / "SKILL.md").read_text()
-        self.assertLess(text.index("Yahoo first"), text.index("Alpaca fallback"))
+Run the existing Yahoo-only skill instructions against these written scenarios and record the unsupported outcome before editing:
 
-    def test_korean_history_has_no_alpaca_fallback(self) -> None:
-        text = (ROOT / "references/data-contract.md").read_text()
-        self.assertIn("Korean equity", text)
-        self.assertIn("fallback_not_supported", text)
+- Yahoo stock history fails for a resolved AAPL candidate.
+- Yahoo crypto history fails for a resolved BTC-USD candidate.
+- Yahoo history fails for a resolved 005930.KS candidate.
+- Yahoo fundamentals and news fail after runtime bootstrap.
 
-    def test_search_snippets_are_discovery_only(self) -> None:
-        text = (ROOT / "references/methodology.md").read_text()
-        self.assertIn("search-result snippet", text)
-        self.assertIn("primary_verified", text)
-```
+Expected baseline: the current skill stops every affected lane because it has no Alpaca or verified web-search fallback workflow. This is the process-documentation RED condition; do not add source-text assertions to the unit suite.
 
-- [ ] **Step 2: Run contract tests and verify RED**
-
-Run: `python3 -m unittest tests.test_skill_contract -v`
-
-Expected: FAIL because the Alpaca and web fallback contracts are absent.
-
-- [ ] **Step 3: Update `SKILL.md` with exact orchestration**
+- [ ] **Step 2: Update `SKILL.md` with exact orchestration**
 
 Add the ordered workflow:
 
@@ -471,24 +455,24 @@ Add the ordered workflow:
 6. If Alpaca is unavailable, unsupported, ambiguous, or incomplete, stop the affected analysis.
 7. For fundamentals/news failure, search and open source documents; never rely on snippets.
 
-- [ ] **Step 4: Update references and metadata**
+- [ ] **Step 3: Update references and metadata**
 
 Document payload schemas, adjustment basis, errors, receipt fields, web source hierarchy, and the dated AAPL/BTC/005930.KS live evidence. In `agents/openai.yaml`, mention Alpaca as an optional installed fallback capability in user-facing metadata only if the schema supports it. Do not add a fabricated `dependencies.tools` URL.
 
-- [ ] **Step 5: Run contract and complete unit tests**
+- [ ] **Step 4: Exercise the documented scenarios against executable gates**
 
-Run: `python3 -m unittest tests.test_skill_contract -v`
+Run the new `alpaca-validate` CLI with valid AAPL and BTC/USD fixture envelopes and an unsupported 005930.KS envelope. Confirm the first two return provider receipts and the Korean envelope returns `fallback_not_supported`. Run a malformed or missing Alpaca input and confirm no price claim or weights are emitted.
 
-Expected: all contract tests PASS.
+Review the web-fallback instructions against the Yahoo fundamentals/news failure scenarios and confirm the required output shape includes source URL, retrieval time, source role, period/as-of date where applicable, and unresolved `null` fields. Because prose instructions are not executable production code, validate their structure with the available OpenAI skill validator rather than a source-text unit test.
 
 Run: `python3 -m unittest discover -s tests -v`
 
 Expected: zero failures and zero errors.
 
-- [ ] **Step 6: Commit the skill contract**
+- [ ] **Step 5: Commit the skill contract**
 
 ```bash
-git add SKILL.md agents/openai.yaml references tests/test_skill_contract.py
+git add SKILL.md agents/openai.yaml references
 git commit -m "Document Alpaca and web evidence fallbacks"
 ```
 
