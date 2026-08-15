@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -13,8 +14,10 @@ import pandas as pd
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 
+from advisor_data import DataGateError  # noqa: E402
 from advisor_data.market_data import MarketBundle  # noqa: E402
 from advisor_data_cli import main  # noqa: E402
+from tests.test_alpaca import bar, crypto_envelope  # noqa: E402
 
 
 class FakeGateway:
@@ -40,6 +43,11 @@ class FakeGateway:
 
 
 class CliTests(unittest.TestCase):
+    def _write_json(self, directory: str, name: str, payload: dict) -> Path:
+        path = Path(directory) / name
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
     def test_search_emits_normalized_json_candidates(self) -> None:
         gateway = FakeGateway()
         stdout = io.StringIO()
@@ -146,6 +154,161 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload["download_receipt"]["source"], "fixture")
         self.assertEqual(payload["return_receipt"]["observation_count"], 3)
         self.assertIn("minimum_variance", payload["portfolio_candidates"])
+
+    def test_alpaca_validate_emits_normalized_receipt(self) -> None:
+        envelope = crypto_envelope(
+            bars=[
+                bar("BTC/USD", "2026-01-05T00:00:00+00:00", 90000.0),
+                bar("BTC/USD", "2026-01-12T00:00:00+00:00", 91000.0),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = self._write_json(tmp, "btc.json", envelope)
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        "alpaca-validate",
+                        "--input",
+                        str(input_path),
+                        "--start",
+                        "2026-01-01",
+                        "--end",
+                        "2026-02-01",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["validation"]["provider"], "alpaca")
+        self.assertEqual(payload["validation"]["symbol"], "BTC-USD")
+        self.assertEqual(payload["normalized"]["observation_count"], 2)
+
+    def test_prepare_and_complete_portfolio_merge_alpaca_history(self) -> None:
+        index = pd.to_datetime(
+            [
+                "2026-01-05T00:00:00+00:00",
+                "2026-01-12T00:00:00+00:00",
+                "2026-01-19T00:00:00+00:00",
+                "2026-01-26T00:00:00+00:00",
+            ]
+        )
+
+        def loader(*, symbols: list[str], **_: object) -> MarketBundle:
+            if symbols == ["AAPL"]:
+                return MarketBundle(
+                    prices=pd.DataFrame(
+                        {"AAPL": [100.0, 102.0, 101.0, 104.0]},
+                        index=index,
+                    ),
+                    currencies={"AAPL": "USD"},
+                    fx_prices={},
+                    receipt={"source": "Yahoo fixture"},
+                )
+            raise DataGateError(
+                "price_history_unavailable",
+                "Yahoo returned no usable crypto history.",
+            )
+
+        envelope = crypto_envelope(
+            bars=[
+                bar("BTC/USD", "2026-01-05T00:00:00+00:00", 90000.0),
+                bar("BTC/USD", "2026-01-12T00:00:00+00:00", 91000.0),
+                bar("BTC/USD", "2026-01-19T00:00:00+00:00", 89000.0),
+                bar("BTC/USD", "2026-01-26T00:00:00+00:00", 93000.0),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_path = Path(tmp) / "workspace.json"
+            alpaca_path = self._write_json(tmp, "btc.json", envelope)
+            prepare_stdout = io.StringIO()
+            with redirect_stdout(prepare_stdout):
+                prepare_code = main(
+                    [
+                        "prepare-portfolio",
+                        "--symbols",
+                        "AAPL",
+                        "BTC-USD",
+                        "--start",
+                        "2026-01-01",
+                        "--end",
+                        "2026-02-01",
+                        "--base-currency",
+                        "USD",
+                        "--workspace",
+                        str(workspace_path),
+                    ],
+                    market_loader=loader,
+                )
+            complete_stdout = io.StringIO()
+            with redirect_stdout(complete_stdout):
+                complete_code = main(
+                    [
+                        "complete-portfolio",
+                        "--workspace",
+                        str(workspace_path),
+                        "--alpaca-input",
+                        str(alpaca_path),
+                        "--frequency",
+                        "weekly",
+                        "--min-observations",
+                        "3",
+                        "--max-weight",
+                        "1.0",
+                    ]
+                )
+
+        prepare_payload = json.loads(prepare_stdout.getvalue())
+        complete_payload = json.loads(complete_stdout.getvalue())
+        self.assertEqual(prepare_code, 0)
+        self.assertEqual(
+            prepare_payload["fallback_required_symbols"],
+            ["BTC-USD"],
+        )
+        self.assertEqual(complete_code, 0)
+        self.assertEqual(
+            complete_payload["download_receipt"]["providers"],
+            {"AAPL": "yahoo", "BTC-USD": "alpaca"},
+        )
+        self.assertEqual(complete_payload["return_receipt"]["observation_count"], 3)
+        self.assertIn("minimum_variance", complete_payload["portfolio_candidates"])
+
+    def test_complete_portfolio_without_required_alpaca_input_emits_no_weights(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_path = Path(tmp) / "workspace.json"
+            prepare_stdout = io.StringIO()
+            with redirect_stdout(prepare_stdout):
+                prepare_code = main(
+                    [
+                        "prepare-portfolio",
+                        "--symbols",
+                        "BTC-USD",
+                        "ETH-USD",
+                        "--start",
+                        "2026-01-01",
+                        "--base-currency",
+                        "USD",
+                        "--workspace",
+                        str(workspace_path),
+                    ],
+                    market_loader=lambda **_: (_ for _ in ()).throw(
+                        DataGateError(
+                            "price_history_unavailable",
+                            "Yahoo failed.",
+                        )
+                    ),
+                )
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                complete_code = main(
+                    ["complete-portfolio", "--workspace", str(workspace_path)]
+                )
+
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(prepare_code, 0)
+        self.assertEqual(complete_code, 2)
+        self.assertEqual(payload["error"]["code"], "fallback_not_supported")
+        self.assertNotIn("portfolio_candidates", payload)
 
 
 if __name__ == "__main__":

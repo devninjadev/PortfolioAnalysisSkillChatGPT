@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 import sys
 from typing import Any, Callable, Sequence
 
@@ -15,6 +16,23 @@ from advisor_data.bootstrap import DependencyBootstrapError, ensure_runtime_depe
 def _emit(payload: dict[str, Any], stream: Any) -> None:
     json.dump(payload, stream, ensure_ascii=False, indent=2, allow_nan=False)
     stream.write("\n")
+
+
+def _read_json(path: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DataGateError(
+            "evidence_workspace_invalid",
+            f"JSON evidence could not be read from {path}.",
+            {"error_type": exc.__class__.__name__},
+        ) from exc
+    if not isinstance(payload, dict):
+        raise DataGateError(
+            "evidence_workspace_invalid",
+            f"JSON evidence at {path} must contain an object.",
+        )
+    return payload
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,6 +61,14 @@ def build_parser() -> argparse.ArgumentParser:
     news.add_argument("--symbol", required=True)
     news.add_argument("--count", type=int, default=10)
 
+    alpaca_validate = subparsers.add_parser(
+        "alpaca-validate",
+        help="Validate a structured Alpaca fallback envelope",
+    )
+    alpaca_validate.add_argument("--input", required=True)
+    alpaca_validate.add_argument("--start", required=True)
+    alpaca_validate.add_argument("--end")
+
     portfolio = subparsers.add_parser("portfolio", help="Build evidence-gated multi-market candidates")
     portfolio.add_argument("--symbols", nargs="+", required=True)
     portfolio.add_argument("--start", required=True)
@@ -51,6 +77,26 @@ def build_parser() -> argparse.ArgumentParser:
     portfolio.add_argument("--frequency", choices=["weekly", "daily"], default="weekly")
     portfolio.add_argument("--min-observations", type=int, default=104)
     portfolio.add_argument("--max-weight", type=float, default=0.7)
+
+    prepare = subparsers.add_parser(
+        "prepare-portfolio",
+        help="Preserve Yahoo evidence per symbol and report fallback requirements",
+    )
+    prepare.add_argument("--symbols", nargs="+", required=True)
+    prepare.add_argument("--start", required=True)
+    prepare.add_argument("--end")
+    prepare.add_argument("--base-currency", default="KRW")
+    prepare.add_argument("--workspace", required=True)
+
+    complete = subparsers.add_parser(
+        "complete-portfolio",
+        help="Merge validated Alpaca evidence and build portfolio candidates",
+    )
+    complete.add_argument("--workspace", required=True)
+    complete.add_argument("--alpaca-input", action="append", default=[])
+    complete.add_argument("--frequency", choices=["weekly", "daily"], default="weekly")
+    complete.add_argument("--min-observations", type=int, default=104)
+    complete.add_argument("--max-weight", type=float, default=0.7)
     return parser
 
 
@@ -58,17 +104,31 @@ def main(
     argv: Sequence[str] | None = None,
     gateway: Any = None,
     market_loader: Callable[..., Any] | None = None,
+    workspace_preparer: Callable[..., Any] | None = None,
+    workspace_completer: Callable[..., Any] | None = None,
+    alpaca_normalizer: Callable[..., Any] | None = None,
 ) -> int:
     args = build_parser().parse_args(argv)
     runtime_receipt: dict[str, Any] | None = None
     try:
         runtime_receipt = ensure_runtime_dependencies()
+        from advisor_data.alpaca import normalize_alpaca_envelope
+        from advisor_data.evidence_workspace import (
+            complete_market_bundle,
+            prepare_yahoo_workspace,
+            read_workspace,
+            workspace_summary,
+            write_workspace,
+        )
         from advisor_data.market_data import build_return_matrix, download_market_bundle
         from advisor_data.portfolio import build_portfolio_candidates
         from advisor_data.yahoo import YahooGateway
 
         yahoo = gateway or YahooGateway()
         active_market_loader = market_loader or download_market_bundle
+        active_workspace_preparer = workspace_preparer or prepare_yahoo_workspace
+        active_workspace_completer = workspace_completer or complete_market_bundle
+        active_alpaca_normalizer = alpaca_normalizer or normalize_alpaca_envelope
         if args.command == "search":
             queries = list(dict.fromkeys([args.query, *args.query_variant]))
             candidate_by_symbol: dict[str, dict[str, Any]] = {}
@@ -119,6 +179,26 @@ def main(
                 sys.stdout,
             )
             return 0
+        if args.command == "alpaca-validate":
+            history = active_alpaca_normalizer(
+                _read_json(args.input),
+                start=args.start,
+                end=args.end,
+            )
+            _emit(
+                {
+                    "status": "ok",
+                    "runtime_receipt": runtime_receipt,
+                    "validation": history.receipt,
+                    "normalized": {
+                        "observation_count": len(history.series),
+                        "first_at": history.series.index.min().isoformat(),
+                        "last_at": history.series.index.max().isoformat(),
+                    },
+                },
+                sys.stdout,
+            )
+            return 0
         if args.command == "portfolio":
             if len(args.symbols) < 2:
                 raise DataGateError("insufficient_assets", "MPT requires at least two symbols.")
@@ -132,6 +212,58 @@ def main(
                 bundle.prices,
                 bundle.currencies,
                 base_currency=args.base_currency,
+                fx_prices=bundle.fx_prices,
+                frequency=args.frequency,
+                min_observations=args.min_observations,
+            )
+            candidates = build_portfolio_candidates(
+                matrix.returns,
+                max_weight=args.max_weight,
+                periods_per_year=matrix.receipt["periods_per_year"],
+            )
+            _emit(
+                {
+                    "status": "ok",
+                    "runtime_receipt": runtime_receipt,
+                    "download_receipt": bundle.receipt,
+                    "return_receipt": matrix.receipt,
+                    "portfolio_candidates": candidates,
+                },
+                sys.stdout,
+            )
+            return 0
+        if args.command == "prepare-portfolio":
+            if len(args.symbols) < 2:
+                raise DataGateError("insufficient_assets", "MPT requires at least two symbols.")
+            workspace = active_workspace_preparer(
+                symbols=args.symbols,
+                start=args.start,
+                end=args.end,
+                base_currency=args.base_currency,
+                market_loader=active_market_loader,
+            )
+            write_workspace(Path(args.workspace), workspace)
+            _emit(
+                {
+                    "status": "ok",
+                    "runtime_receipt": runtime_receipt,
+                    "workspace": str(Path(args.workspace)),
+                    **workspace_summary(workspace),
+                },
+                sys.stdout,
+            )
+            return 0
+        if args.command == "complete-portfolio":
+            workspace = read_workspace(Path(args.workspace))
+            symbols = list(workspace.get("symbols", []))
+            if len(symbols) < 2:
+                raise DataGateError("insufficient_assets", "MPT requires at least two symbols.")
+            envelopes = [_read_json(path) for path in args.alpaca_input]
+            bundle = active_workspace_completer(workspace, envelopes)
+            matrix = build_return_matrix(
+                bundle.prices,
+                bundle.currencies,
+                base_currency=str(workspace.get("base_currency")),
                 fx_prices=bundle.fx_prices,
                 frequency=args.frequency,
                 min_observations=args.min_observations,
