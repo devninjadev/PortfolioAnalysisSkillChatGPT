@@ -1,17 +1,19 @@
 ---
 name: evidence-first-portfolio-advisor
-description: Use when analyzing listed equities, ETFs, or cryptoassets; resolving a security name to a Yahoo ticker; verifying prices, fundamentals, valuation, or news; or constructing evidence-backed multi-asset portfolio candidates.
+description: Use in ChatGPT Work Cloud mode when analyzing listed equities, ETFs, or cryptoassets; resolving a security name to a Yahoo ticker; verifying prices, fundamentals, valuation, or news; constructing evidence-backed multi-asset portfolio candidates; or fulfilling an explicit backtest request.
 ---
 
 # Evidence-First Portfolio Advisor
 
 Give conditional investment counseling from retrieved evidence. Never turn missing data into a confident opinion, weight, price claim, or trade instruction.
 
+This skill runs only in ChatGPT Work Cloud mode.
+
 ## Follow the evidence gates
 
 1. Classify the request semantically with an LLM into:
    - instruments mentioned by the user;
-   - requested analyses: price, fundamentals, news, portfolio;
+   - requested analyses: price, fundamentals, news, portfolio, backtest;
    - decision constraints actually supplied by the user;
    - unresolved ambiguities.
 2. Resolve every name to a Yahoo candidate set. Do not invent ticker suffixes or select a symbol absent from the returned set. Validate the selected candidate with price history. Ask the user only when two or more plausible candidates remain.
@@ -138,14 +140,32 @@ python scripts/advisor_data_cli.py complete-portfolio \
 
 The completion command must receive evidence for every required asset and every Yahoo FX leg. It may mix Yahoo and Alpaca asset histories, but it never silently drops a failed asset. If any gate fails, do not fabricate MPT, correlations, equal-weight fallbacks, or substitute tickers.
 
+## Render requested backtests by default
+
+When the user explicitly requests a `backtest` or `백테스트`, the default answer includes both of these adjacent outputs before the narrative interpretation:
+
+1. A ChatGPT built-in interactive cumulative-total-return line chart.
+2. A portfolio evaluation table immediately below the chart.
+
+Use the ChatGPT Work Cloud-mode built-in chart capability only. Do not search for, install, recommend, or generate Plotly, TradingView, ECharts, an external chart service, custom HTML, a separate chart application, or a fallback for another product.
+
+The chart follows the visual structure of a portfolio-versus-benchmarks performance chart: a descriptive backtest title, portfolio and benchmark names, exact start and end dates, cumulative total return on the vertical axis, dates on the horizontal axis, a visible legend, and hoverable series. Normalize every displayed series to `0%` at one shared first valid observation. Use adjusted prices and dividend reinvestment when the validated provider supports them, and disclose the actual treatment, base currency, rebalance rule, observation frequency, and sample window. Weekly last observations may be used for display readability, but summary metrics must be calculated from the stated validated return series rather than from pixels or a visually downsampled chart.
+
+Include the tested portfolio and every user-named benchmark. If the user names no benchmark, use LLM semantic judgment over the portfolio's primary market, asset class, and base currency to select and clearly label up to two relevant investable broad-market benchmarks; do not use ticker suffixes, regexes, or a fixed country lookup table. Resolve and validate benchmark symbols through the same evidence gates as portfolio assets. If no benchmark is validated, show the portfolio-only chart and mark benchmark-relative table cells `null` with the reason instead of silently substituting a ticker.
+
+The evaluation table uses one column per displayed portfolio or benchmark and these rows in this order: cumulative return, annualized return, annualized volatility, Sharpe ratio, Sortino ratio, maximum drawdown (MDD), primary-benchmark beta, primary-benchmark correlation, and annualized alpha. Identify the primary benchmark in the table heading or note. State the risk-free-rate value, source, as-of date, and calculation convention used for Sharpe, Sortino, and alpha. Missing inputs stay `null`; do not invent a risk-free rate or a benchmark-relative statistic.
+
+A requested backtest is a historical-performance presentation, not an MPT optimization. It may use a shorter user-requested window such as one year even when that window cannot satisfy the default 104-week MPT gate. In that case, provide the validated backtest chart and evaluation table, but do not produce optimization weights unless the independent MPT gates pass. Do not imply suitability or future returns from the backtest.
+
 ## Report in this order
 
 1. Scope, assumptions, unresolved limits.
 2. Instrument-resolution table and validation receipts.
 3. Verified facts with date, source role, currency, and missing data.
-4. Calculations and methodology.
-5. Interpretation, counterevidence, and thesis-breaking conditions.
-6. Conditional portfolio candidates, sensitivity, and concentration risks.
-7. What additional user constraints or primary sources are still needed.
+4. When requested, the built-in interactive backtest chart and its immediately following evaluation table.
+5. Calculations and methodology.
+6. Interpretation, counterevidence, and thesis-breaking conditions.
+7. Conditional portfolio candidates, sensitivity, and concentration risks.
+8. What additional user constraints or primary sources are still needed.
 
 Do not collapse company quality, current valuation, and portfolio fit into one universal score. Do not imply suitability from a backtest alone. Identify the provider for each price series. Mention that Yahoo Finance/yfinance and Alpaca market data are for research and may require licensing review for redistribution or commercial use.
