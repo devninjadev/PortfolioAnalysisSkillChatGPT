@@ -14,6 +14,11 @@ from . import DataGateError
 
 
 SUPPORTED_FALLBACK_CLASSES = {"us_equity", "crypto"}
+SUPPORTED_CORPORATE_ACTION_GROUPS = {
+    "cash_dividends",
+    "forward_splits",
+    "reverse_splits",
+}
 
 
 @dataclass(frozen=True)
@@ -221,6 +226,82 @@ def _action_items(
     return [_mapping(item, f"{key} announcement") for item in value]
 
 
+def _validate_corporate_actions_evidence(
+    payload: Mapping[str, Any],
+    provider_symbol: str,
+    series: pd.Series,
+) -> dict[str, Any]:
+    request = _mapping(payload.get("request"), "corporate actions request")
+    symbols = request.get("symbols")
+    if (
+        not isinstance(symbols, list)
+        or {str(symbol) for symbol in symbols} != {provider_symbol}
+    ):
+        raise DataGateError(
+            "corporate_action_adjustment_failed",
+            "Alpaca corporate actions were not requested for exactly the declared asset.",
+            {"provider_symbol": provider_symbol, "requested_symbols": symbols},
+        )
+    if "ca_types" not in request or request.get("ca_types") is not None:
+        raise DataGateError(
+            "corporate_action_adjustment_failed",
+            "Alpaca corporate actions must be requested without a type filter.",
+            {"ca_types": request.get("ca_types")},
+        )
+    raw_start = str(request.get("start") or "").strip()
+    raw_end = str(request.get("end") or "").strip()
+    if not raw_start or not raw_end:
+        raise DataGateError(
+            "corporate_action_adjustment_failed",
+            "Alpaca corporate actions request must preserve start and end dates.",
+        )
+    request_start = _utc_timestamp(raw_start, "corporate actions request start")
+    request_end = _utc_timestamp(raw_end, "corporate actions request end")
+    observed_start = pd.Timestamp(series.index.min())
+    observed_end = pd.Timestamp(series.index.max())
+    if (
+        request_start.date() > observed_start.date()
+        or request_end.date() < observed_end.date()
+    ):
+        raise DataGateError(
+            "corporate_action_adjustment_failed",
+            "Alpaca corporate actions do not cover the observed stock history.",
+            {
+                "request_start": raw_start,
+                "request_end": raw_end,
+                "observed_start": observed_start.date().isoformat(),
+                "observed_end": observed_end.date().isoformat(),
+            },
+        )
+    if payload.get("next_page_token"):
+        raise DataGateError(
+            "corporate_action_adjustment_failed",
+            "Alpaca corporate actions evidence is paginated and incomplete.",
+        )
+
+    announcements = _mapping(
+        payload.get("announcements", {}),
+        "corporate action announcements",
+    )
+    unsupported = sorted(
+        key
+        for key, value in announcements.items()
+        if key not in SUPPORTED_CORPORATE_ACTION_GROUPS and value not in (None, [])
+    )
+    if unsupported:
+        raise DataGateError(
+            "corporate_action_adjustment_failed",
+            "Alpaca returned corporate actions that the price adapter cannot safely adjust.",
+            {"unsupported_action_groups": unsupported},
+        )
+    return {
+        "symbols": [provider_symbol],
+        "start": raw_start,
+        "end": raw_end,
+        "all_types_requested": True,
+    }
+
+
 def _adjust_stock_close(
     series: pd.Series,
     actions_payload: Mapping[str, Any],
@@ -394,7 +475,13 @@ def normalize_alpaca_envelope(
         expected_tool=expected_tool,
     )
     applied_actions: list[dict[str, Any]] = []
+    actions_request_receipt: dict[str, Any] | None = None
     if fallback_class == "us_equity":
+        actions_request_receipt = _validate_corporate_actions_evidence(
+            actions_payload,
+            provider_symbol,
+            series,
+        )
         series, applied_actions = _adjust_stock_close(
             series,
             actions_payload,
@@ -440,6 +527,7 @@ def normalize_alpaca_envelope(
     }
     if asset_receipt is not None:
         receipt["asset"] = asset_receipt
+        receipt["corporate_actions_request"] = actions_request_receipt
         receipt["corporate_actions_applied"] = applied_actions
     return AlpacaHistory(series=series, currency="USD", receipt=receipt)
 

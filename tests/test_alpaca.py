@@ -35,6 +35,15 @@ def stock_envelope(
     actions: dict[str, object],
 ) -> dict[str, object]:
     provider_symbol = provider_symbol or symbol
+    actions_payload = {
+        "request": {
+            "ca_types": None,
+            "start": "1900-01-01",
+            "end": "2100-01-01",
+            "symbols": [provider_symbol],
+        },
+        **actions,
+    }
     asset = {
         "id": "asset-id",
         "asset_class": "us_equity",
@@ -69,7 +78,7 @@ def stock_envelope(
             },
             "bars": {provider_symbol: bars},
         },
-        "corporate_actions_response": {"result": json.dumps(actions)},
+        "corporate_actions_response": {"result": json.dumps(actions_payload)},
     }
 
 
@@ -246,6 +255,43 @@ class AlpacaEnvelopeTests(unittest.TestCase):
             result.receipt["corporate_actions_applied"][0]["type"],
             "cash_dividend",
         )
+
+    def test_corporate_actions_request_must_cover_observed_bars(self) -> None:
+        envelope = stock_envelope(
+            bars=[
+                bar("AAPL", "2026-01-05T05:00:00+00:00", 100.0),
+                bar("AAPL", "2026-01-12T05:00:00+00:00", 101.0),
+            ],
+            actions={"announcements": {}},
+        )
+        payload = json.loads(envelope["corporate_actions_response"]["result"])
+        payload["request"]["start"] = "2026-01-10"
+        envelope["corporate_actions_response"]["result"] = json.dumps(payload)
+
+        with self.assertRaisesRegex(DataGateError, "corporate_action_adjustment_failed"):
+            normalize_alpaca_envelope(envelope, "2026-01-01", "2026-01-20")
+
+    def test_unhandled_corporate_action_fails_closed(self) -> None:
+        envelope = stock_envelope(
+            bars=[
+                bar("AAPL", "2026-01-05T05:00:00+00:00", 100.0),
+                bar("AAPL", "2026-01-12T05:00:00+00:00", 101.0),
+            ],
+            actions={
+                "announcements": {
+                    "stock_dividends": [
+                        {
+                            "symbol": "AAPL",
+                            "rate": 0.1,
+                            "ex_date": "2026-01-12",
+                        }
+                    ]
+                }
+            },
+        )
+
+        with self.assertRaisesRegex(DataGateError, "corporate_action_adjustment_failed"):
+            normalize_alpaca_envelope(envelope, "2026-01-01", "2026-01-20")
 
     def test_conflicting_duplicate_bars_are_rejected(self) -> None:
         with self.assertRaisesRegex(DataGateError, "conflicting bars"):
