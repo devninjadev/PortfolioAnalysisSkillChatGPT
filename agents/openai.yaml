@@ -1,14 +1,13 @@
 interface:
-  display_name: 증거 기반 포트폴리오 상담가
-  short_description: 검증된 글로벌 주가·재무·뉴스로 포트폴리오 분석
-  default_prompt: Use $evidence-first-portfolio-advisor to verify these securities
-    with current data and build conditional portfolio candidates.
-  icon_small: assets/icon.svg
-  icon_large: assets/icon.svg
+  display_name: "증거 기반 포트폴리오 상담가"
+  short_description: "Yahoo 우선 검증과 Alpaca·웹 대안 출처로 투자 분석"
+  default_prompt: "Use $evidence-first-portfolio-advisor to verify with Yahoo first, use eligible Alpaca or opened-web fallbacks when needed, and build evidence-gated portfolio candidates."
+  icon_small: "./assets/icon.svg"
+  icon_large: "./assets/icon.svg"
 policy:
   products:
-  - chatgpt
-  - codex
-  - api
-  - atlas
+  - "chatgpt"
+  - "codex"
+  - "api"
+  - "atlas"
   allow_implicit_invocation: true
