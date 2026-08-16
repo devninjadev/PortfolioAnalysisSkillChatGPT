@@ -373,7 +373,18 @@ def _history_coverage_status(
     requested_start: pd.Timestamp,
     requested_end: pd.Timestamp | None,
 ) -> tuple[str, dict[str, int]]:
-    first = series.index.min()
+    on_or_after_start = series.index[series.index >= requested_start]
+    if on_or_after_start.empty:
+        raise DataGateError(
+            "wolfram_history_incomplete",
+            "Wolfram AdjustedClose history has no observation on or after the requested start.",
+            {
+                "requested_start": requested_start.isoformat(),
+                "last_observation": series.index.max().isoformat(),
+                "endpoint_tolerance_days": HISTORY_ENDPOINT_TOLERANCE_DAYS,
+            },
+        )
+    first = on_or_after_start.min()
     last = series.index.max()
     start_gap = max(0, int((first.normalize() - requested_start.normalize()).days))
     end_gap = (

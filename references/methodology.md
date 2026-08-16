@@ -60,7 +60,7 @@ Yahoo 값이 비어 있거나 조회가 실패하면 웹 검색으로 후보 출
 
 기본 분석은 주간 수익률, 최소 104개의 공통 관측치, 사용자가 선택한 기준 통화를 사용한다. 서로 다른 통화의 자산을 섞으면 Yahoo가 제공하는 `통화USD=X` 환율 다리로 각 통화 1단위의 USD 가치를 구한 뒤 같은 기준 통화의 가격열을 만든다. 직접 환율이 없으면 `통화=X` 역수를 시도한다. 자산 가격은 임의로 전진 채움하지 않는다. 환율은 거래일 불일치 보정을 위해 최대 3일까지만 전진 채운다.
 
-여러 종목 중 일부 Yahoo **가격 이력만** 실패하면 성공분을 버리지 않는다. `currency_unavailable`나 다른 비가격 실패는 대안 경로로 보내지 않는다. 가격 실패 심볼도 Yahoo currency metadata를 가격과 독립적으로 다시 확인하고 자산/기준 통화 FX를 미리 보존한다. `prepare-portfolio` 워크스페이스에 종목별 Yahoo 가격·통화·FX·오류를 보존한 뒤, 실패 심볼은 의미상 자격이 있으면 Alpaca를 먼저, 그 외 또는 Alpaca 게이트 실패 뒤에는 exact Financial entity가 확인될 때만 Wolfram으로 채워 `complete-portfolio`를 실행한다. 폴백 정규화 통화는 Yahoo 정규화 통화와 같아야 하며 계산은 Yahoo 원 통화 단위를 권위로 쓴다. 자산마다 최종 가격 공급자는 정확히 하나이며, 결과에는 각 자산별 `yahoo`, `alpaca`, 또는 `wolfram`을 명시한다. 필수 종목이나 Yahoo FX가 하나라도 해결되지 않으면 종목을 조용히 빼지 않고 모든 비중 출력을 막는다.
+여러 종목 중 일부 Yahoo **가격 이력만** 실패하면 성공분을 버리지 않는다. 실패는 stage-aware 영수증을 남기며, `network_error`는 `asset_price` stage로 확인된 경우에만 가격 폴백이다. generic network, `currency_metadata`, `fx_history`, 다른 비가격 실패는 대안 경로로 보내지 않는다. 가격 실패 심볼도 Yahoo currency metadata를 가격과 독립적으로 다시 확인하고 자산/기준 통화 FX를 미리 보존한다. `prepare-portfolio` 워크스페이스에 종목별 Yahoo 가격·통화·FX·오류를 보존한 뒤, 실패 심볼은 의미상 자격이 있으면 Alpaca를 먼저, 그 외 또는 Alpaca 게이트 실패 뒤에는 exact Financial entity가 확인될 때만 Wolfram으로 채워 `complete-portfolio`를 실행한다. 폴백 정규화 통화는 Yahoo 정규화 통화와 같아야 하며 계산은 Yahoo 원 통화 단위를 권위로 쓴다. 자산마다 최종 가격 공급자는 정확히 하나이며, 결과에는 각 자산별 `yahoo`, `alpaca`, 또는 `wolfram`을 명시한다. 필수 종목이나 Yahoo FX가 하나라도 해결되지 않으면 종목을 조용히 빼지 않고 모든 비중 출력을 막는다.
 
 제시 가능한 결과는 다음 두 개다.
 

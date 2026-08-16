@@ -21,6 +21,9 @@ MINOR_CURRENCY_UNITS = {
     "ILA": ("ILS", 0.01),
 }
 ISO_CURRENCY_PATTERN = re.compile(r"^[A-Za-z]{3}$")
+YAHOO_STAGE_ASSET_PRICE = "asset_price"
+YAHOO_STAGE_CURRENCY_METADATA = "currency_metadata"
+YAHOO_STAGE_FX_HISTORY = "fx_history"
 
 
 @dataclass(frozen=True)
@@ -113,7 +116,11 @@ def _download_usd_per_currency(
     raise DataGateError(
         "fx_history_unavailable",
         f"Yahoo returned no usable USD conversion pair for {currency}.",
-        {"currency": currency, "attempts": failures},
+        {
+            "stage": YAHOO_STAGE_FX_HISTORY,
+            "currency": currency,
+            "attempts": failures,
+        },
     )
 
 
@@ -196,6 +203,7 @@ def download_market_bundle(
                 "network_error",
                 "Yahoo asset price download failed with and without repair.",
                 {
+                    "stage": YAHOO_STAGE_ASSET_PRICE,
                     "repair_error_type": repair_exc.__class__.__name__,
                     "fallback_error_type": fallback_exc.__class__.__name__,
                 },
@@ -211,7 +219,10 @@ def download_market_bundle(
             raise DataGateError(
                 "currency_unavailable",
                 f"Yahoo currency metadata failed for {symbol}.",
-                {"error_type": exc.__class__.__name__},
+                {
+                    "stage": YAHOO_STAGE_CURRENCY_METADATA,
+                    "error_type": exc.__class__.__name__,
+                },
             ) from exc
         raw_currency = str(metadata.get("currency") or "")
         try:
@@ -220,6 +231,7 @@ def download_market_bundle(
             raise DataGateError(
                 "currency_unavailable",
                 f"Yahoo currency metadata is unusable for {symbol}: {raw_currency or 'missing'}",
+                {"stage": YAHOO_STAGE_CURRENCY_METADATA},
             ) from exc
         currencies[symbol] = raw_currency
 

@@ -16,6 +16,9 @@ from . import DataGateError
 from .alpaca import normalize_alpaca_envelope
 from .market_data import (
     MarketBundle,
+    YAHOO_STAGE_ASSET_PRICE,
+    YAHOO_STAGE_CURRENCY_METADATA,
+    YAHOO_STAGE_FX_HISTORY,
     _currency_spec,
     download_currency_bridge,
     download_market_bundle,
@@ -24,7 +27,21 @@ from .wolfram import normalize_wolfram_envelope
 
 
 WORKSPACE_SCHEMA_VERSION = 1
-FALLBACK_ELIGIBLE_YAHOO_FAILURES = frozenset({"price_history_unavailable"})
+FALLBACK_ELIGIBLE_PRICE_CODES = frozenset(
+    {"price_history_unavailable", "network_error"}
+)
+
+
+def _is_fallback_eligible_yahoo_failure(exc: DataGateError) -> bool:
+    """Admit only failures proven to originate in Yahoo asset-price retrieval."""
+
+    stage = exc.details.get("stage")
+    if stage is not None:
+        return (
+            stage == YAHOO_STAGE_ASSET_PRICE
+            and exc.code in FALLBACK_ELIGIBLE_PRICE_CODES
+        )
+    return exc.code == "price_history_unavailable"
 
 
 def _error_payload(exc: DataGateError) -> dict[str, Any]:
@@ -138,7 +155,10 @@ def _download_yahoo_currency_metadata(symbol: str) -> tuple[str, dict[str, Any]]
         raise DataGateError(
             "currency_unavailable",
             f"Yahoo currency metadata failed for {symbol}.",
-            {"error_type": exc.__class__.__name__},
+            {
+                "stage": YAHOO_STAGE_CURRENCY_METADATA,
+                "error_type": exc.__class__.__name__,
+            },
         ) from exc
     raw_currency = str(metadata.get("currency") or "").strip()
     try:
@@ -147,6 +167,7 @@ def _download_yahoo_currency_metadata(symbol: str) -> tuple[str, dict[str, Any]]
         raise DataGateError(
             "currency_unavailable",
             f"Yahoo currency metadata is unusable for {symbol}: {raw_currency or 'missing'}",
+            {"stage": YAHOO_STAGE_CURRENCY_METADATA},
         ) from exc
     return raw_currency, {
         "source": "Yahoo Finance via yfinance",
@@ -167,6 +188,7 @@ def _validated_currency_evidence(
         raise DataGateError(
             "currency_unavailable",
             f"Yahoo currency loader returned malformed evidence for {symbol}.",
+            {"stage": YAHOO_STAGE_CURRENCY_METADATA},
         )
     raw_currency, raw_receipt = value
     try:
@@ -175,11 +197,13 @@ def _validated_currency_evidence(
         raise DataGateError(
             "currency_unavailable",
             f"Yahoo currency metadata is unusable for {symbol}: {raw_currency or 'missing'}",
+            {"stage": YAHOO_STAGE_CURRENCY_METADATA},
         ) from exc
     if not isinstance(raw_receipt, Mapping):
         raise DataGateError(
             "currency_unavailable",
             f"Yahoo currency receipt is malformed for {symbol}.",
+            {"stage": YAHOO_STAGE_CURRENCY_METADATA},
         )
     receipt = dict(raw_receipt)
     receipt.update(
@@ -233,6 +257,7 @@ def prepare_yahoo_workspace(
                 raise DataGateError(
                     "price_history_unavailable",
                     f"Yahoo per-symbol bundle omitted {symbol}.",
+                    {"stage": YAHOO_STAGE_ASSET_PRICE},
                 )
             assets[symbol] = {
                 "currency": bundle.currencies[symbol],
@@ -254,7 +279,7 @@ def prepare_yahoo_workspace(
             for currency, receipt in bundle.receipt.get("fx_pairs", {}).items():
                 fx_receipts[str(currency).upper()] = dict(receipt)
         except DataGateError as exc:
-            if exc.code not in FALLBACK_ELIGIBLE_YAHOO_FAILURES:
+            if not _is_fallback_eligible_yahoo_failure(exc):
                 raise
             failures[symbol] = _error_payload(exc)
             try:
@@ -270,14 +295,17 @@ def prepare_yahoo_workspace(
                 raise DataGateError(
                     "currency_unavailable",
                     f"Yahoo currency metadata failed for {symbol}.",
-                    {"error_type": currency_exc.__class__.__name__},
+                    {
+                        "stage": YAHOO_STAGE_CURRENCY_METADATA,
+                        "error_type": currency_exc.__class__.__name__,
+                    },
                 ) from currency_exc
             yahoo_currency_evidence[symbol] = {"currency": raw_currency, **receipt}
         except Exception as exc:
             raise DataGateError(
                 "network_error",
                 f"Yahoo per-symbol retrieval failed for {symbol}.",
-                {"error_type": exc.__class__.__name__},
+                {"stage": "market_bundle", "error_type": exc.__class__.__name__},
             ) from exc
 
     currency_by_symbol = {
@@ -300,7 +328,10 @@ def prepare_yahoo_workspace(
             fx_failures[required_currency] = {
                 "code": "fx_history_unavailable",
                 "message": f"Yahoo FX retrieval failed for {required_currency}.",
-                "details": {"error_type": exc.__class__.__name__},
+                "details": {
+                    "stage": YAHOO_STAGE_FX_HISTORY,
+                    "error_type": exc.__class__.__name__,
+                },
             }
 
     retrieved_at = datetime.now(timezone.utc).isoformat()

@@ -447,6 +447,21 @@ class WolframEnvelopeTests(unittest.TestCase):
         self.assertEqual(result.receipt["requested_range"]["end"], None)
         self.assertEqual(result.receipt["coverage_status"], "endpoint_tolerated")
 
+    def test_open_ended_adjusted_history_rejects_only_pre_window_observations(
+        self,
+    ) -> None:
+        envelope = financial_envelope(
+            request_start="2026-01-03",
+            request_end=None,
+            observations=[
+                observation("2025-12-22T00:00:00+00:00", 98.0),
+                observation("2025-12-29T00:00:00+00:00", 99.0),
+            ],
+        )
+
+        with self.assertRaisesRegex(DataGateError, "wolfram_history_incomplete"):
+            normalize_wolfram_envelope(envelope, "2026-01-03", None)
+
     def test_recent_price_uses_separate_freshness_gate(self) -> None:
         stale = financial_envelope(
             property_name="LatestTrade",

@@ -318,7 +318,7 @@ The selected series and rejected alternatives are recorded. For ordinary fallbac
 
 The exact tool response wrapper may also be retained when available, but the normalized association is mandatory. The validator does not depend on rendered prose or an image.
 
-The monetary unit relationship is structured and deterministic. The initial verified mapping includes `USDollars → USD` and `Euros → EUR`; future unit names require an explicit mapping addition rather than a country allowlist or free-form model assertion. `AdjustedClose` uses a seven-calendar-day market-calendar endpoint tolerance. Recent-price properties do not use the historical coverage gate and instead use their separate seven-day freshness policy.
+The monetary unit relationship is structured and deterministic. The initial verified mapping includes `USDollars → USD` and `Euros → EUR`; future unit names require an explicit mapping addition rather than a country allowlist or free-form model assertion. `AdjustedClose` uses a seven-calendar-day market-calendar endpoint tolerance. Start coverage is measured from the first observation on or after the requested start; an open-ended series containing only pre-window observations is incomplete. Recent-price properties do not use the historical coverage gate and instead use their separate seven-day freshness policy.
 
 ## Treasury Capability Contract
 
@@ -505,7 +505,7 @@ Keep the existing schema-versioned prepare/complete architecture and extend it w
 
 ### Prepare
 
-`prepare-portfolio` continues to save successful Yahoo assets, currencies, FX legs, receipts, and per-symbol failures. Only `price_history_unavailable` becomes `fallback_required_symbols`; currency, schema, network, and other non-price failures stop. For a price-only failure, prepare independently retrieves and stores Yahoo currency metadata for the failed symbol and every required Yahoo asset/base FX leg before emitting the workspace.
+`prepare-portfolio` continues to save successful Yahoo assets, currencies, FX legs, receipts, and per-symbol failures. Only failures proven to originate at the Yahoo `asset_price` stage become `fallback_required_symbols`: `price_history_unavailable` remains price-specific, while `network_error` requires an explicit `details.stage == "asset_price"`. Generic network errors and `currency_metadata`, `fx_history`, schema, or other non-price stages stop. For an asset-price-stage failure, prepare independently retrieves and stores Yahoo currency metadata for the failed symbol and every required Yahoo asset/base FX leg before emitting the workspace.
 
 ### Complete
 
