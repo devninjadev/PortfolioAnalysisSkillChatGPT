@@ -25,6 +25,8 @@ def financial_envelope(
     property_name: str = "AdjustedClose",
     required_price_basis: str = "adjusted_total_return",
     currency: str = "USD",
+    exchange: str = "NASDAQ",
+    issuer: str = "Apple Inc.",
     observations: list[dict[str, object]],
 ) -> dict[str, object]:
     return {
@@ -52,7 +54,8 @@ def financial_envelope(
             "entity_type": "Financial",
             "entity": provider_entity,
             "symbol": symbol,
-            "exchange": "NASDAQ",
+            "exchange": exchange,
+            "issuer": issuer,
             "security_type": "Equity",
             "currency": currency,
             "property": property_name,

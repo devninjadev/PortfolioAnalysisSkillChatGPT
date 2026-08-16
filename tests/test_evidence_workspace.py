@@ -43,7 +43,118 @@ def yahoo_bundle(
     )
 
 
+def yahoo_currency(
+    symbol: str,
+    currency: str = "USD",
+) -> tuple[str, dict[str, object]]:
+    return currency, {
+        "source": "Yahoo Finance via yfinance",
+        "symbol": symbol,
+        "currency": currency,
+        "retrieved_at": "2026-08-16T00:00:00+00:00",
+    }
+
+
+def yahoo_fx(currency: str, **_: object) -> tuple[pd.Series, dict[str, str]]:
+    values = [1.15, 1.16] if currency == "EUR" else [0.00075, 0.00076]
+    return (
+        pd.Series(values, index=INDEX, name=f"{currency}USD=X"),
+        {"symbol": f"{currency}USD=X", "orientation": "USD_per_currency_unit"},
+    )
+
+
 class EvidenceWorkspaceTests(unittest.TestCase):
+    def test_non_price_yahoo_failure_is_not_marked_fallback_required(self) -> None:
+        with self.assertRaisesRegex(DataGateError, "currency_unavailable"):
+            prepare_yahoo_workspace(
+                ["SAP.DE"],
+                "2026-01-01",
+                "2026-02-01",
+                "USD",
+                market_loader=lambda **_: (_ for _ in ()).throw(
+                    DataGateError(
+                        "currency_unavailable",
+                        "Yahoo currency metadata failed for SAP.DE.",
+                    )
+                ),
+                currency_loader=lambda **_: self.fail(
+                    "A non-price failure must not enter fallback preparation."
+                ),
+            )
+
+    def test_price_failure_persists_yahoo_currency_and_downloads_asset_fx(self) -> None:
+        currency_calls: list[str] = []
+        fx_calls: list[str] = []
+
+        def currency_loader(*, symbol: str) -> tuple[str, dict[str, object]]:
+            currency_calls.append(symbol)
+            return yahoo_currency(symbol, "EUR")
+
+        def fx_loader(*, currency: str, **kwargs: object):
+            fx_calls.append(currency)
+            return yahoo_fx(currency, **kwargs)
+
+        workspace = prepare_yahoo_workspace(
+            ["SAP.DE"],
+            "2026-01-01",
+            "2026-02-01",
+            "USD",
+            market_loader=lambda **_: (_ for _ in ()).throw(
+                DataGateError("price_history_unavailable", "Yahoo price history failed.")
+            ),
+            currency_loader=currency_loader,
+            base_fx_loader=fx_loader,
+        )
+        envelope = financial_envelope(
+            symbol="SAP.DE",
+            provider_entity="XETR:SAP",
+            currency="EUR",
+            exchange="XETRA",
+            issuer="SAP SE",
+            observations=[
+                observation("2026-01-05T00:00:00+00:00", 200.0),
+                observation("2026-01-12T00:00:00+00:00", 202.0),
+            ],
+        )
+
+        bundle = complete_market_bundle(workspace, [envelope])
+
+        self.assertEqual(currency_calls, ["SAP.DE"])
+        self.assertEqual(fx_calls, ["EUR"])
+        self.assertEqual(
+            workspace["yahoo_currency_evidence"]["SAP.DE"]["currency"], "EUR"
+        )
+        self.assertIn("EUR", workspace["fx_prices"])
+        self.assertEqual(bundle.currencies["SAP.DE"], "EUR")
+        self.assertEqual(bundle.receipt["providers"], {"SAP.DE": "wolfram"})
+
+    def test_fallback_currency_must_match_stored_yahoo_currency(self) -> None:
+        workspace = prepare_yahoo_workspace(
+            ["SAP.DE"],
+            "2026-01-01",
+            "2026-02-01",
+            "USD",
+            market_loader=lambda **_: (_ for _ in ()).throw(
+                DataGateError("price_history_unavailable", "Yahoo price history failed.")
+            ),
+            currency_loader=lambda **_: yahoo_currency("SAP.DE", "EUR"),
+            base_fx_loader=yahoo_fx,
+        )
+        envelope = financial_envelope(
+            symbol="SAP.DE",
+            provider_entity="XETR:SAP",
+            currency="USD",
+            exchange="XETRA",
+            issuer="SAP SE",
+            observations=[
+                observation("2026-01-05T00:00:00+00:00", 200.0),
+                observation("2026-01-12T00:00:00+00:00", 202.0),
+            ],
+        )
+
+        with self.assertRaisesRegex(DataGateError, "fallback_currency_mismatch"):
+            complete_market_bundle(workspace, [envelope])
+
     def test_prepare_preserves_yahoo_success_and_records_failure(self) -> None:
         calls: list[str] = []
 
@@ -63,6 +174,8 @@ class EvidenceWorkspaceTests(unittest.TestCase):
             None,
             "USD",
             market_loader=loader,
+            currency_loader=lambda *, symbol: yahoo_currency(symbol, "KRW"),
+            base_fx_loader=yahoo_fx,
         )
 
         self.assertEqual(calls, ["AAPL", "005930.KS"])
@@ -111,6 +224,7 @@ class EvidenceWorkspaceTests(unittest.TestCase):
             "2026-02-01",
             "USD",
             market_loader=loader,
+            currency_loader=lambda *, symbol: yahoo_currency(symbol, "USD"),
         )
         bundle = complete_market_bundle(
             workspace,
@@ -152,6 +266,8 @@ class EvidenceWorkspaceTests(unittest.TestCase):
             "2026-02-01",
             "USD",
             market_loader=loader,
+            currency_loader=lambda *, symbol: yahoo_currency(symbol, "EUR"),
+            base_fx_loader=yahoo_fx,
         )
         envelope = financial_envelope(
             symbol="SAP.DE",
@@ -164,14 +280,6 @@ class EvidenceWorkspaceTests(unittest.TestCase):
         )
         envelope["result"]["symbol"] = "SAP.DE"  # type: ignore[index]
         envelope["result"]["exchange"] = "XETRA"  # type: ignore[index]
-        workspace["fx_prices"]["EUR"] = {
-            "name": "EURUSD=X",
-            "observations": [
-                {"timestamp": "2026-01-05T00:00:00+00:00", "value": 1.15},
-                {"timestamp": "2026-01-12T00:00:00+00:00", "value": 1.16},
-            ],
-        }
-
         bundle = complete_market_bundle(workspace, [envelope])
 
         self.assertEqual(list(bundle.prices.columns), ["AAPL", "SAP.DE"])
@@ -190,6 +298,7 @@ class EvidenceWorkspaceTests(unittest.TestCase):
             market_loader=lambda **_: (_ for _ in ()).throw(
                 DataGateError("price_history_unavailable", "Yahoo failed.")
             ),
+            currency_loader=lambda *, symbol: yahoo_currency(symbol, "USD"),
         )
         envelope = crypto_envelope(
             bars=[
@@ -215,14 +324,11 @@ class EvidenceWorkspaceTests(unittest.TestCase):
             "2026-02-01",
             "USD",
             market_loader=loader,
+            currency_loader=lambda *, symbol: yahoo_currency(
+                symbol, "EUR" if symbol == "SAP.DE" else "USD"
+            ),
+            base_fx_loader=yahoo_fx,
         )
-        workspace["fx_prices"]["EUR"] = {
-            "name": "EURUSD=X",
-            "observations": [
-                {"timestamp": "2026-01-05T00:00:00+00:00", "value": 1.15},
-                {"timestamp": "2026-01-12T00:00:00+00:00", "value": 1.16},
-            ],
-        }
         wolfram = financial_envelope(
             symbol="SAP.DE",
             provider_entity="XETR:SAP",
@@ -269,6 +375,8 @@ class EvidenceWorkspaceTests(unittest.TestCase):
             market_loader=lambda **_: (_ for _ in ()).throw(
                 DataGateError("price_history_unavailable", "Yahoo failed.")
             ),
+            currency_loader=lambda *, symbol: yahoo_currency(symbol, "EUR"),
+            base_fx_loader=yahoo_fx,
         )
         alpaca = crypto_envelope(
             symbol="SAP.DE",
@@ -318,6 +426,8 @@ class EvidenceWorkspaceTests(unittest.TestCase):
             market_loader=lambda **_: (_ for _ in ()).throw(
                 DataGateError("price_history_unavailable", "Yahoo failed.")
             ),
+            currency_loader=lambda *, symbol: yahoo_currency(symbol, "EUR"),
+            base_fx_loader=yahoo_fx,
         )
         envelope = {"provider": "unvalidated", "symbol": "SAP.DE"}
 
@@ -332,6 +442,10 @@ class EvidenceWorkspaceTests(unittest.TestCase):
             "USD",
             market_loader=lambda **_: (_ for _ in ()).throw(
                 DataGateError("price_history_unavailable", "Yahoo failed.")
+            ),
+            currency_loader=lambda *, symbol: yahoo_currency(symbol, "EUR"),
+            base_fx_loader=lambda **_: (_ for _ in ()).throw(
+                DataGateError("fx_history_unavailable", "EUR FX failed.")
             ),
         )
         envelope = financial_envelope(
@@ -361,6 +475,7 @@ class EvidenceWorkspaceTests(unittest.TestCase):
             None,
             "KRW",
             market_loader=failed_loader,
+            currency_loader=lambda *, symbol: yahoo_currency(symbol, "KRW"),
             base_fx_loader=lambda **_: (
                 pd.Series([0.00075, 0.00076], index=INDEX, name="KRWUSD=X"),
                 {"symbol": "KRWUSD=X"},
@@ -385,6 +500,7 @@ class EvidenceWorkspaceTests(unittest.TestCase):
             market_loader=lambda **_: (_ for _ in ()).throw(
                 DataGateError("price_history_unavailable", "Yahoo failed.")
             ),
+            currency_loader=lambda *, symbol: yahoo_currency(symbol, "USD"),
         )
 
         with self.assertRaisesRegex(DataGateError, "fallback_not_supported"):
@@ -399,6 +515,7 @@ class EvidenceWorkspaceTests(unittest.TestCase):
             market_loader=lambda **_: (_ for _ in ()).throw(
                 DataGateError("price_history_unavailable", "Yahoo failed.")
             ),
+            currency_loader=lambda *, symbol: yahoo_currency(symbol, "USD"),
             base_fx_loader=lambda **_: (_ for _ in ()).throw(
                 DataGateError("fx_history_unavailable", "KRW FX failed.")
             ),

@@ -10,6 +10,7 @@ import tempfile
 from typing import Any, Callable, Mapping, Sequence
 
 import pandas as pd
+import yfinance as yf
 
 from . import DataGateError
 from .alpaca import normalize_alpaca_envelope
@@ -23,6 +24,7 @@ from .wolfram import normalize_wolfram_envelope
 
 
 WORKSPACE_SCHEMA_VERSION = 1
+FALLBACK_ELIGIBLE_YAHOO_FAILURES = frozenset({"price_history_unavailable"})
 
 
 def _error_payload(exc: DataGateError) -> dict[str, Any]:
@@ -127,6 +129,71 @@ def _merge_fx(
     destination[currency] = existing.combine_first(incoming).sort_index()
 
 
+def _download_yahoo_currency_metadata(symbol: str) -> tuple[str, dict[str, Any]]:
+    """Retrieve Yahoo currency metadata independently of asset price history."""
+
+    try:
+        metadata = yf.Ticker(symbol).get_history_metadata() or {}
+    except Exception as exc:
+        raise DataGateError(
+            "currency_unavailable",
+            f"Yahoo currency metadata failed for {symbol}.",
+            {"error_type": exc.__class__.__name__},
+        ) from exc
+    raw_currency = str(metadata.get("currency") or "").strip()
+    try:
+        normalized_currency, _, source_unit = _currency_spec(raw_currency)
+    except DataGateError as exc:
+        raise DataGateError(
+            "currency_unavailable",
+            f"Yahoo currency metadata is unusable for {symbol}: {raw_currency or 'missing'}",
+        ) from exc
+    return raw_currency, {
+        "source": "Yahoo Finance via yfinance",
+        "evidence_kind": "asset_currency_metadata",
+        "symbol": symbol,
+        "currency": raw_currency,
+        "normalized_currency": normalized_currency,
+        "source_currency_unit": source_unit,
+        "retrieved_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _validated_currency_evidence(
+    symbol: str,
+    value: Any,
+) -> tuple[str, dict[str, Any]]:
+    if not isinstance(value, tuple) or len(value) != 2:
+        raise DataGateError(
+            "currency_unavailable",
+            f"Yahoo currency loader returned malformed evidence for {symbol}.",
+        )
+    raw_currency, raw_receipt = value
+    try:
+        normalized_currency, _, source_unit = _currency_spec(raw_currency)
+    except DataGateError as exc:
+        raise DataGateError(
+            "currency_unavailable",
+            f"Yahoo currency metadata is unusable for {symbol}: {raw_currency or 'missing'}",
+        ) from exc
+    if not isinstance(raw_receipt, Mapping):
+        raise DataGateError(
+            "currency_unavailable",
+            f"Yahoo currency receipt is malformed for {symbol}.",
+        )
+    receipt = dict(raw_receipt)
+    receipt.update(
+        {
+            "evidence_kind": "asset_currency_metadata",
+            "symbol": symbol,
+            "currency": str(raw_currency),
+            "normalized_currency": normalized_currency,
+            "source_currency_unit": source_unit,
+        }
+    )
+    return str(raw_currency), receipt
+
+
 def prepare_yahoo_workspace(
     symbols: list[str],
     start: str,
@@ -134,6 +201,7 @@ def prepare_yahoo_workspace(
     base_currency: str,
     market_loader: Callable[..., MarketBundle] | None = None,
     base_fx_loader: Callable[..., tuple[pd.Series, dict[str, str]]] | None = None,
+    currency_loader: Callable[..., tuple[str, dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Collect Yahoo successes per symbol without losing them to another symbol's failure."""
 
@@ -142,6 +210,7 @@ def prepare_yahoo_workspace(
         raise DataGateError("insufficient_assets", "At least one symbol is required.")
     active_market_loader = market_loader or download_market_bundle
     active_base_fx_loader = base_fx_loader or download_currency_bridge
+    active_currency_loader = currency_loader or _download_yahoo_currency_metadata
     base, base_scale, _ = _currency_spec(base_currency)
     if base_scale != 1.0:
         raise DataGateError("unsupported_currency", "Base currency must be a major currency unit.")
@@ -151,6 +220,7 @@ def prepare_yahoo_workspace(
     fx_series: dict[str, pd.Series] = {}
     fx_receipts: dict[str, dict[str, Any]] = {}
     fx_failures: dict[str, dict[str, Any]] = {}
+    yahoo_currency_evidence: dict[str, dict[str, Any]] = {}
     for symbol in ordered_symbols:
         try:
             bundle = active_market_loader(
@@ -169,34 +239,67 @@ def prepare_yahoo_workspace(
                 "prices": _serialize_series(bundle.prices[symbol], symbol),
                 "receipt": bundle.receipt,
             }
+            normalized_currency, _, source_unit = _currency_spec(bundle.currencies[symbol])
+            yahoo_currency_evidence[symbol] = {
+                "source": "Yahoo Finance via yfinance",
+                "evidence_kind": "asset_currency_metadata",
+                "symbol": symbol,
+                "currency": bundle.currencies[symbol],
+                "normalized_currency": normalized_currency,
+                "source_currency_unit": source_unit,
+                "retrieved_at": bundle.receipt.get("retrieved_at"),
+            }
             for currency, series in bundle.fx_prices.items():
                 _merge_fx(fx_series, str(currency).upper(), series)
             for currency, receipt in bundle.receipt.get("fx_pairs", {}).items():
                 fx_receipts[str(currency).upper()] = dict(receipt)
         except DataGateError as exc:
+            if exc.code not in FALLBACK_ELIGIBLE_YAHOO_FAILURES:
+                raise
             failures[symbol] = _error_payload(exc)
+            try:
+                raw_currency, receipt = _validated_currency_evidence(
+                    symbol,
+                    active_currency_loader(symbol=symbol),
+                )
+            except DataGateError:
+                failures.pop(symbol, None)
+                raise
+            except Exception as currency_exc:
+                failures.pop(symbol, None)
+                raise DataGateError(
+                    "currency_unavailable",
+                    f"Yahoo currency metadata failed for {symbol}.",
+                    {"error_type": currency_exc.__class__.__name__},
+                ) from currency_exc
+            yahoo_currency_evidence[symbol] = {"currency": raw_currency, **receipt}
         except Exception as exc:
-            failures[symbol] = {
-                "code": "network_error",
-                "message": f"Yahoo per-symbol retrieval failed for {symbol}.",
-                "details": {"error_type": exc.__class__.__name__},
-            }
+            raise DataGateError(
+                "network_error",
+                f"Yahoo per-symbol retrieval failed for {symbol}.",
+                {"error_type": exc.__class__.__name__},
+            ) from exc
 
-    if base != "USD" and failures and base not in fx_series:
+    currency_by_symbol = {
+        symbol: str(evidence.get("currency") or "")
+        for symbol, evidence in yahoo_currency_evidence.items()
+    }
+    required_fx = _required_fx(currency_by_symbol, base)
+    for required_currency in sorted(required_fx - set(fx_series)):
         try:
             series, receipt = active_base_fx_loader(
-                currency=base,
+                currency=required_currency,
                 start=start,
                 end=end,
             )
-            _merge_fx(fx_series, base, series)
-            fx_receipts[base] = dict(receipt)
+            _merge_fx(fx_series, required_currency, series)
+            fx_receipts[required_currency] = dict(receipt)
         except DataGateError as exc:
-            fx_failures[base] = _error_payload(exc)
+            fx_failures[required_currency] = _error_payload(exc)
         except Exception as exc:
-            fx_failures[base] = {
+            fx_failures[required_currency] = {
                 "code": "fx_history_unavailable",
-                "message": f"Yahoo FX retrieval failed for {base}.",
+                "message": f"Yahoo FX retrieval failed for {required_currency}.",
                 "details": {"error_type": exc.__class__.__name__},
             }
 
@@ -209,6 +312,7 @@ def prepare_yahoo_workspace(
         "base_currency": base,
         "assets": assets,
         "failures": failures,
+        "yahoo_currency_evidence": yahoo_currency_evidence,
         "fx_prices": {
             currency: _serialize_series(series, str(series.name or currency))
             for currency, series in sorted(fx_series.items())
@@ -303,7 +407,12 @@ def complete_market_bundle(
     symbols = [str(symbol) for symbol in workspace.get("symbols", [])]
     assets = workspace.get("assets", {})
     failures = workspace.get("failures", {})
-    if not isinstance(assets, Mapping) or not isinstance(failures, Mapping):
+    yahoo_currency_evidence = workspace.get("yahoo_currency_evidence", {})
+    if (
+        not isinstance(assets, Mapping)
+        or not isinstance(failures, Mapping)
+        or not isinstance(yahoo_currency_evidence, Mapping)
+    ):
         raise DataGateError("evidence_workspace_invalid", "Workspace assets and failures must be objects.")
 
     active_normalizers = dict(
@@ -369,10 +478,46 @@ def complete_market_bundle(
             start=str(workspace.get("start")),
             end=workspace.get("end"),
         )
+        currency_evidence = yahoo_currency_evidence.get(symbol)
+        if not isinstance(currency_evidence, Mapping):
+            raise DataGateError(
+                "currency_unavailable",
+                f"Independent Yahoo currency evidence is unavailable for {symbol}.",
+                {"symbol": symbol},
+            )
+        yahoo_currency = str(currency_evidence.get("currency") or "")
+        try:
+            normalized_yahoo_currency, _, _ = _currency_spec(yahoo_currency)
+            normalized_fallback_currency, _, _ = _currency_spec(history.currency)
+        except DataGateError as exc:
+            raise DataGateError(
+                "fallback_currency_mismatch",
+                f"Fallback or Yahoo currency evidence is invalid for {symbol}.",
+                {
+                    "yahoo_currency": yahoo_currency,
+                    "fallback_currency": history.currency,
+                },
+            ) from exc
+        if normalized_fallback_currency != normalized_yahoo_currency:
+            raise DataGateError(
+                "fallback_currency_mismatch",
+                f"Fallback currency does not match Yahoo currency evidence for {symbol}.",
+                {
+                    "yahoo_currency": yahoo_currency,
+                    "normalized_yahoo_currency": normalized_yahoo_currency,
+                    "fallback_currency": history.currency,
+                    "normalized_fallback_currency": normalized_fallback_currency,
+                },
+            )
         price_series[symbol] = history.series
-        currencies[symbol] = history.currency
+        currencies[symbol] = yahoo_currency
         providers[symbol] = str(history.receipt["provider"])
-        receipts[symbol] = {**history.receipt, "primary_failure": failures[symbol]}
+        receipts[symbol] = {
+            **history.receipt,
+            "currency": yahoo_currency,
+            "yahoo_currency_evidence": dict(currency_evidence),
+            "primary_failure": failures[symbol],
+        }
 
     fx_prices = {
         str(currency).upper(): _deserialize_series(payload, str(currency).upper())
