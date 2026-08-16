@@ -18,7 +18,11 @@ from advisor_data import DataGateError  # noqa: E402
 from advisor_data.market_data import MarketBundle  # noqa: E402
 from advisor_data_cli import build_parser, main  # noqa: E402
 from tests.test_alpaca import bar, crypto_envelope  # noqa: E402
-from tests.test_treasury import treasury_envelope, treasury_observation  # noqa: E402
+from tests.test_treasury import (  # noqa: E402
+    inferred_treasury_envelope,
+    treasury_envelope,
+    treasury_observation,
+)
 from tests.test_wolfram import financial_envelope, observation  # noqa: E402
 from tests.test_wolfram_fx import (  # noqa: E402
     fx_observation,
@@ -320,6 +324,23 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(payload["validation"]["qualifiers"]["maturity_duration"], "10Year")
         self.assertEqual(payload["normalized"]["observation_count"], 2)
+
+    def test_treasury_validate_discloses_lower_confidence_tier(self) -> None:
+        envelope = inferred_treasury_envelope(
+            evidence_kind="us_treasury_current",
+            observations=[treasury_observation("2026-08-13", 4.63)],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = self._write_json(tmp, "us10y-labeled.json", envelope)
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(["treasury-validate", "--input", str(input_path)])
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["validation"]["evidence_tier"], "provider_labeled_inferred")
+        self.assertEqual(payload["validation"]["evidence_confidence"], "lower")
+        self.assertEqual(payload["validation"]["exact_qualifier_status"], "unavailable")
 
     def test_prepare_and_complete_portfolio_merge_alpaca_history(self) -> None:
         index = pd.to_datetime(

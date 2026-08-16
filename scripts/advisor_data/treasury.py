@@ -31,6 +31,12 @@ SUPPORTED_OPERATORS = frozenset(
 SUPPORTED_EVIDENCE_KINDS = frozenset(
     {"us_treasury_current", "us_treasury_history"}
 )
+SUPPORTED_EVIDENCE_TIERS = frozenset(
+    {"provider_confirmed", "provider_labeled_inferred"}
+)
+INFERRED_BINDING_CHANNELS = frozenset(
+    {"official_plugin_labeled_result", "official_plugin_input_interpretation"}
+)
 QUALIFIER_KEYS = (
     "security_type",
     "maturity_duration",
@@ -345,6 +351,114 @@ def _missing_names_requested(missing: Sequence[Any], requested: str) -> bool:
     return False
 
 
+def _validate_inferred_binding(
+    source: Mapping[str, Any],
+    requested_maturity: Mapping[str, Any],
+    evidence_kind: str,
+    series: pd.Series,
+    sources: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any], float]:
+    if not isinstance(source.get("exact_qualifier_failure"), Mapping):
+        raise DataGateError(
+            "treasury_binding_unavailable",
+            "Lower-confidence Treasury evidence is missing the exact-query failure receipt.",
+        )
+    exact_failure = _mapping(
+        source.get("exact_qualifier_failure"), "Treasury exact qualifier failure"
+    )
+    exact_missing = exact_failure.get("missing")
+    if exact_failure.get("status") != "unavailable" or not isinstance(exact_missing, list) or not exact_missing:
+        raise DataGateError(
+            "treasury_binding_unavailable",
+            "Lower-confidence Treasury evidence must preserve the unavailable exact query.",
+        )
+
+    binding = _mapping(source.get("binding_evidence"), "Treasury binding evidence")
+    if binding.get("channel") not in INFERRED_BINDING_CHANNELS:
+        raise DataGateError(
+            "treasury_binding_unavailable",
+            "Treasury binding evidence does not identify a supported official-plugin channel.",
+            {"channel": binding.get("channel")},
+        )
+    _required_text(binding, "query")
+    labels = (binding.get("displayed_label"), binding.get("input_interpretation"))
+    if not any(isinstance(value, str) and value.strip() for value in labels):
+        raise DataGateError(
+            "treasury_binding_unavailable",
+            "Treasury binding evidence needs an explicit displayed label or input interpretation.",
+        )
+    if not any(item.get("role") == "official_plugin_tool" for item in sources):
+        raise DataGateError(
+            "treasury_binding_unavailable",
+            "Lower-confidence Treasury evidence must come from the official plugin.",
+        )
+
+    if evidence_kind == "us_treasury_current":
+        if binding.get("observation_date") is None:
+            raise DataGateError(
+                "treasury_binding_unavailable",
+                "Labeled Treasury evidence is missing its observation date.",
+            )
+        observation_date = _utc_timestamp(
+            binding.get("observation_date"), "Treasury binding observation_date"
+        )
+        if observation_date not in series.index:
+            raise DataGateError(
+                "treasury_binding_unavailable",
+                "The labeled Treasury observation date is not present in the result.",
+            )
+    else:
+        if not isinstance(binding.get("observation_date_range"), Mapping):
+            raise DataGateError(
+                "treasury_binding_unavailable",
+                "Interpreted Treasury history is missing its observation date range.",
+            )
+        date_range = _mapping(
+            binding.get("observation_date_range"), "Treasury binding observation date range"
+        )
+        bound_start = _utc_timestamp(date_range.get("start"), "Treasury binding range start")
+        bound_end = _utc_timestamp(date_range.get("end"), "Treasury binding range end")
+        if bound_start != series.index.min() or bound_end != series.index.max():
+            raise DataGateError(
+                "treasury_binding_unavailable",
+                "The interpreted Treasury date range does not match the returned observations.",
+            )
+
+    decision = _mapping(source.get("binding_decision"), "Treasury binding decision")
+    if decision.get("decision_kind") != "structured_llm_semantic_binding":
+        raise DataGateError(
+            "treasury_binding_unavailable",
+            "Treasury maturity binding must be a structured LLM semantic decision.",
+        )
+    requested_years = _finite_number(
+        decision.get("requested_maturity_years"),
+        "Treasury binding requested maturity years",
+        positive=True,
+    )
+    bound_years = _finite_number(
+        decision.get("bound_maturity_years"),
+        "Treasury binding bound maturity years",
+        positive=True,
+    )
+    conflicts = decision.get("conflicts")
+    if (
+        decision.get("maturity_match") is not True
+        or not isinstance(conflicts, list)
+        or conflicts
+        or requested_years != requested_maturity["years"]
+        or bound_years != requested_maturity["years"]
+    ):
+        raise DataGateError(
+            "treasury_binding_unavailable",
+            "Treasury labeled or interpreted maturity does not match the requested maturity.",
+            {
+                "requested_maturity_years": requested_maturity["years"],
+                "decision": dict(decision),
+            },
+        )
+    return dict(exact_failure), dict(binding), bound_years
+
+
 def normalize_treasury_envelope(envelope: Mapping[str, Any]) -> TreasurySeries:
     """Return an exact, evidence-gated U.S. Treasury yield series."""
 
@@ -358,6 +472,13 @@ def normalize_treasury_envelope(envelope: Mapping[str, Any]) -> TreasurySeries:
             "wolfram_schema_error",
             "Wolfram Treasury evidence kind is unsupported.",
             {"evidence_kind": source.get("evidence_kind")},
+        )
+    evidence_tier = source.get("evidence_tier", "provider_confirmed")
+    if evidence_tier not in SUPPORTED_EVIDENCE_TIERS:
+        raise DataGateError(
+            "wolfram_schema_error",
+            "Wolfram Treasury evidence tier is unsupported.",
+            {"evidence_tier": evidence_tier},
         )
     if source.get("country_entity") != "UnitedStates":
         raise DataGateError(
@@ -422,38 +543,51 @@ def normalize_treasury_envelope(envelope: Mapping[str, Any]) -> TreasurySeries:
             "Wolfram Treasury returned no observations.",
             {"missing": list(missing)},
         )
-    observed_qualifiers = _complete_qualifier_echo(
-        result, "observed_qualifiers", "provider-observed"
-    )
-    _qualifiers_must_match(qualifiers, observed_qualifiers, "provider_observed")
-    observed_maturity = _typed_maturity(
-        result.get("observed_maturity"),
-        "provider-observed",
-        expected_evidence_kind="provider_observed_typed",
-    )
-    try:
-        maturity_years = _finite_number(
-            result.get("maturity_years"), "Treasury maturity_years", positive=True
+    exact_qualifier_failure: dict[str, Any] | None = None
+    binding_evidence: dict[str, Any] | None = None
+    if evidence_tier == "provider_confirmed":
+        observed_qualifiers = _complete_qualifier_echo(
+            result, "observed_qualifiers", "provider-observed"
         )
-    except DataGateError as exc:
-        raise DataGateError(
-            "treasury_maturity_mismatch",
-            "Treasury result requires provider-derived typed numeric maturity years.",
-            {"maturity_years": result.get("maturity_years")},
-        ) from exc
-    if (
-        observed_maturity["duration"] != qualifiers["maturity_duration"]
-        or observed_maturity["years"] != requested_maturity["years"]
-        or maturity_years != observed_maturity["years"]
-    ):
-        raise DataGateError(
-            "treasury_maturity_mismatch",
-            "Treasury requested and provider-observed typed maturities disagree.",
-            {
-                "requested_maturity": requested_maturity,
-                "observed_maturity": observed_maturity,
-                "maturity_years": maturity_years,
-            },
+        _qualifiers_must_match(qualifiers, observed_qualifiers, "provider_observed")
+        observed_maturity = _typed_maturity(
+            result.get("observed_maturity"),
+            "provider-observed",
+            expected_evidence_kind="provider_observed_typed",
+        )
+        try:
+            maturity_years = _finite_number(
+                result.get("maturity_years"), "Treasury maturity_years", positive=True
+            )
+        except DataGateError as exc:
+            raise DataGateError(
+                "treasury_maturity_mismatch",
+                "Treasury result requires provider-derived typed numeric maturity years.",
+                {"maturity_years": result.get("maturity_years")},
+            ) from exc
+        if (
+            observed_maturity["duration"] != qualifiers["maturity_duration"]
+            or observed_maturity["years"] != requested_maturity["years"]
+            or maturity_years != observed_maturity["years"]
+        ):
+            raise DataGateError(
+                "treasury_maturity_mismatch",
+                "Treasury requested and provider-observed typed maturities disagree.",
+                {
+                    "requested_maturity": requested_maturity,
+                    "observed_maturity": observed_maturity,
+                    "maturity_years": maturity_years,
+                },
+            )
+    else:
+        observed_qualifiers = None
+        observed_maturity = None
+        exact_qualifier_failure, binding_evidence, maturity_years = _validate_inferred_binding(
+            source,
+            requested_maturity,
+            evidence_kind,
+            series,
+            sources,
         )
     minimum = 1 if evidence_kind == "us_treasury_current" else 2
     if len(series) < minimum:
@@ -487,7 +621,27 @@ def normalize_treasury_envelope(envelope: Mapping[str, Any]) -> TreasurySeries:
         "coverage_status": _coverage_status(series, requested_range),
         "missing": list(missing),
         "retrieved_at": retrieved_at,
+        "evidence_tier": evidence_tier,
+        "evidence_confidence": "high" if evidence_tier == "provider_confirmed" else "lower",
+        "maturity_binding": (
+            "provider_typed_exact"
+            if evidence_tier == "provider_confirmed"
+            else "provider_labeled_or_semantically_inferred"
+        ),
+        "exact_qualifier_status": (
+            "confirmed" if evidence_tier == "provider_confirmed" else "unavailable"
+        ),
     }
+    if exact_qualifier_failure is not None and binding_evidence is not None:
+        receipt.update(
+            {
+                "exact_qualifier_failure": exact_qualifier_failure,
+                "binding_evidence": binding_evidence,
+                "dependency_warning": (
+                    "Downstream calculations inherit a lower-confidence Treasury rate input."
+                ),
+            }
+        )
     return TreasurySeries(series=series, maturity_years=maturity_years, receipt=receipt)
 
 

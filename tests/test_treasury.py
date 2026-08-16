@@ -102,7 +102,163 @@ def treasury_series_for_curve(maturity_years: float, value: float):
     )
 
 
+def inferred_treasury_envelope(
+    *,
+    evidence_kind: str = "us_treasury_history",
+    maturity_duration: str = "10Year",
+    maturity_years: float = 10.0,
+    observations: list[dict[str, object]],
+) -> dict[str, object]:
+    envelope = treasury_envelope(
+        evidence_kind=evidence_kind,
+        maturity_duration=maturity_duration,
+        maturity_years=maturity_years,
+        observations=observations,
+    )
+    envelope["evidence_tier"] = "provider_labeled_inferred"
+    envelope["result"].pop("observed_qualifiers")
+    envelope["result"].pop("observed_maturity")
+    envelope["result"].pop("maturity_years")
+    envelope["exact_qualifier_failure"] = {
+        "status": "unavailable",
+        "query": f'exact Wolfram Treasury qualifiers for {maturity_duration}',
+        "missing": [
+            {
+                "maturity_duration": maturity_duration,
+                "value": "Missing[NotAvailable]",
+            }
+        ],
+    }
+    binding_evidence: dict[str, object] = {
+        "channel": (
+            "official_plugin_labeled_result"
+            if evidence_kind == "us_treasury_current"
+            else "official_plugin_input_interpretation"
+        ),
+        "query": f"U.S. Treasury {maturity_duration} yield",
+        "input_interpretation": f"United States Treasury {maturity_duration} Note yield",
+        "displayed_label": f"{maturity_duration} note",
+    }
+    if evidence_kind == "us_treasury_current":
+        binding_evidence["observation_date"] = observations[0]["timestamp"]
+    else:
+        binding_evidence["observation_date_range"] = {
+            "start": observations[0]["timestamp"],
+            "end": observations[-1]["timestamp"],
+        }
+    envelope["binding_evidence"] = binding_evidence
+    envelope["binding_decision"] = {
+        "decision_kind": "structured_llm_semantic_binding",
+        "requested_maturity_years": maturity_years,
+        "bound_maturity_years": maturity_years,
+        "maturity_match": True,
+        "conflicts": [],
+    }
+    envelope["sources"] = [
+        {
+            "name": "Wolfram official plugin",
+            "role": "official_plugin_tool",
+            "underlying_source_annotation": None,
+        }
+    ]
+    return envelope
+
+
 class TreasuryEnvelopeTests(unittest.TestCase):
+    def test_labeled_current_treasury_is_usable_at_lower_confidence(self) -> None:
+        result = normalize_treasury_envelope(
+            inferred_treasury_envelope(
+                evidence_kind="us_treasury_current",
+                observations=[treasury_observation("2026-08-13", 4.63)],
+            )
+        )
+
+        self.assertEqual(result.maturity_years, 10.0)
+        self.assertEqual(result.series.tolist(), [4.63])
+        self.assertEqual(result.receipt["evidence_tier"], "provider_labeled_inferred")
+        self.assertEqual(result.receipt["evidence_confidence"], "lower")
+        self.assertEqual(
+            result.receipt["maturity_binding"],
+            "provider_labeled_or_semantically_inferred",
+        )
+        self.assertEqual(result.receipt["exact_qualifier_status"], "unavailable")
+
+    def test_interpreted_historical_treasury_is_usable_at_lower_confidence(self) -> None:
+        result = normalize_treasury_envelope(
+            inferred_treasury_envelope(
+                observations=[
+                    treasury_observation("2026-08-12", 4.55),
+                    treasury_observation("2026-08-13", 4.63),
+                ]
+            )
+        )
+
+        self.assertEqual(result.series.tolist(), [4.55, 4.63])
+        self.assertEqual(result.receipt["evidence_confidence"], "lower")
+        self.assertEqual(
+            result.receipt["binding_evidence"]["channel"],
+            "official_plugin_input_interpretation",
+        )
+        self.assertEqual(result.receipt["exact_qualifier_failure"]["status"], "unavailable")
+
+    def test_lower_tier_rejects_missing_exact_failure_label_or_date_binding(self) -> None:
+        mutations = (
+            lambda envelope: envelope.pop("exact_qualifier_failure"),
+            lambda envelope: (
+                envelope["binding_evidence"].update({"displayed_label": None}),
+                envelope["binding_evidence"].update({"input_interpretation": None}),
+            ),
+            lambda envelope: envelope["binding_evidence"].pop("observation_date"),
+        )
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                envelope = inferred_treasury_envelope(
+                    evidence_kind="us_treasury_current",
+                    observations=[treasury_observation("2026-08-13", 4.63)],
+                )
+                mutate(envelope)
+                with self.assertRaisesRegex(DataGateError, "treasury_binding_unavailable"):
+                    normalize_treasury_envelope(envelope)
+
+    def test_lower_tier_rejects_maturity_conflict_and_unsupported_channel(self) -> None:
+        conflict = inferred_treasury_envelope(
+            observations=[
+                treasury_observation("2026-08-12", 4.55),
+                treasury_observation("2026-08-13", 4.63),
+            ]
+        )
+        conflict["binding_decision"]["bound_maturity_years"] = 2.0
+        conflict["binding_decision"]["maturity_match"] = False
+        conflict["binding_decision"]["conflicts"] = ["displayed maturity is 2 years"]
+        with self.assertRaisesRegex(DataGateError, "treasury_binding_unavailable"):
+            normalize_treasury_envelope(conflict)
+
+        unsupported = inferred_treasury_envelope(
+            evidence_kind="us_treasury_current",
+            observations=[treasury_observation("2026-08-13", 4.63)],
+        )
+        unsupported["binding_evidence"]["channel"] = "webpage_scrape"
+        with self.assertRaisesRegex(DataGateError, "treasury_binding_unavailable"):
+            normalize_treasury_envelope(unsupported)
+
+    def test_lower_tier_rejects_non_percent_and_unlabeled_numeric_result(self) -> None:
+        wrong_unit = inferred_treasury_envelope(
+            evidence_kind="us_treasury_current",
+            observations=[treasury_observation("2026-08-13", 4.63)],
+        )
+        wrong_unit["result"]["unit"] = "BasisPoints"
+        with self.assertRaisesRegex(DataGateError, "wolfram_unit_mismatch"):
+            normalize_treasury_envelope(wrong_unit)
+
+        unlabeled = inferred_treasury_envelope(
+            evidence_kind="us_treasury_current",
+            observations=[treasury_observation("2026-08-13", 4.63)],
+        )
+        unlabeled["binding_evidence"]["displayed_label"] = None
+        unlabeled["binding_evidence"]["input_interpretation"] = None
+        with self.assertRaisesRegex(DataGateError, "treasury_binding_unavailable"):
+            normalize_treasury_envelope(unlabeled)
+
     def test_nominal_constant_maturity_history_preserves_qualifiers(self) -> None:
         result = normalize_treasury_envelope(
             treasury_envelope(
@@ -118,6 +274,8 @@ class TreasuryEnvelopeTests(unittest.TestCase):
         self.assertEqual(result.receipt["unit"], "Percent")
         self.assertEqual(result.receipt["qualifiers"]["security_type"], "Note")
         self.assertEqual(result.receipt["source_names"], ["FRED (Federal Reserve Economic Data)"])
+        self.assertEqual(result.receipt["evidence_tier"], "provider_confirmed")
+        self.assertEqual(result.receipt["evidence_confidence"], "high")
 
     def test_tips_and_negative_yields_are_valid(self) -> None:
         result = normalize_treasury_envelope(
