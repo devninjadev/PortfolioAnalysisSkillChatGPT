@@ -309,6 +309,7 @@ When exact qualifiers return unavailable but the official plugin still provides 
   "exact_qualifier_failure": {
     "status": "unavailable",
     "query": "exact Wolfram Treasury qualifiers for 10Year",
+    "requested_maturity_years": 10.0,
     "missing": [{"maturity_duration": "10Year", "value": "Missing[NotAvailable]"}]
   },
   "binding_evidence": {

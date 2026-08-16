@@ -122,6 +122,7 @@ def inferred_treasury_envelope(
     envelope["exact_qualifier_failure"] = {
         "status": "unavailable",
         "query": f'exact Wolfram Treasury qualifiers for {maturity_duration}',
+        "requested_maturity_years": maturity_years,
         "missing": [
             {
                 "maturity_duration": maturity_duration,
@@ -252,6 +253,16 @@ class TreasuryEnvelopeTests(unittest.TestCase):
         unsupported["binding_evidence"]["channel"] = "webpage_scrape"
         with self.assertRaisesRegex(DataGateError, "treasury_binding_unavailable"):
             normalize_treasury_envelope(unsupported)
+
+    def test_lower_tier_rejects_exact_failure_for_a_different_maturity(self) -> None:
+        envelope = inferred_treasury_envelope(
+            evidence_kind="us_treasury_current",
+            observations=[treasury_observation("2026-08-13", 4.63)],
+        )
+        envelope["exact_qualifier_failure"]["requested_maturity_years"] = 2.0
+
+        with self.assertRaisesRegex(DataGateError, "treasury_binding_unavailable"):
+            normalize_treasury_envelope(envelope)
 
     def test_lower_tier_rejects_non_percent_and_unlabeled_numeric_result(self) -> None:
         wrong_unit = inferred_treasury_envelope(

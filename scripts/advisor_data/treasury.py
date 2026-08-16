@@ -372,6 +372,26 @@ def _validate_inferred_binding(
             "treasury_binding_unavailable",
             "Lower-confidence Treasury evidence must preserve the unavailable exact query.",
         )
+    try:
+        failed_query_maturity = _finite_number(
+            exact_failure.get("requested_maturity_years"),
+            "Treasury exact-query requested maturity years",
+            positive=True,
+        )
+    except DataGateError as exc:
+        raise DataGateError(
+            "treasury_binding_unavailable",
+            "The exact-query failure must identify its typed requested maturity.",
+        ) from exc
+    if failed_query_maturity != requested_maturity["years"]:
+        raise DataGateError(
+            "treasury_binding_unavailable",
+            "The exact-query failure belongs to a different Treasury maturity.",
+            {
+                "failed_query_maturity_years": failed_query_maturity,
+                "requested_maturity_years": requested_maturity["years"],
+            },
+        )
 
     binding = _mapping(source.get("binding_evidence"), "Treasury binding evidence")
     if binding.get("channel") not in INFERRED_BINDING_CHANNELS:
