@@ -5,12 +5,19 @@ import sys
 import unittest
 from pathlib import Path
 
+import pandas as pd
+
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 
 from advisor_data import DataGateError  # noqa: E402
-from advisor_data.treasury import normalize_treasury_envelope  # noqa: E402
+from advisor_data.treasury import (  # noqa: E402
+    align_periodic_risk_free,
+    build_historical_yield_curve,
+    build_yield_curve,
+    normalize_treasury_envelope,
+)
 
 
 def treasury_observation(timestamp: str, value: float) -> dict[str, object]:
@@ -61,6 +68,20 @@ def treasury_envelope(
         ],
         "retrieved_at": "2026-08-16T00:00:00+00:00",
     }
+
+
+def treasury_series_for_curve(maturity_years: float, value: float):
+    security_type = "Bill" if maturity_years < 1.0 else "Note"
+    maturity_duration = "3Month" if maturity_years == 0.25 else f"{int(maturity_years)}Year"
+    return normalize_treasury_envelope(
+        treasury_envelope(
+            security_type=security_type,
+            maturity_duration=maturity_duration,
+            maturity_years=maturity_years,
+            observations=[treasury_observation("2026-08-13T00:00:00+00:00", value)],
+            evidence_kind="us_treasury_current",
+        )
+    )
 
 
 class TreasuryEnvelopeTests(unittest.TestCase):
@@ -347,6 +368,165 @@ class TreasuryEnvelopeTests(unittest.TestCase):
         envelope["country_entity"] = "Canada"
         with self.assertRaisesRegex(DataGateError, "wolfram_entity_mismatch"):
             normalize_treasury_envelope(envelope)
+
+
+class YieldCurveTests(unittest.TestCase):
+    def test_curve_separates_observed_and_missing_points(self) -> None:
+        result = build_yield_curve(
+            {
+                0.25: treasury_series_for_curve(0.25, 3.87),
+                2.0: treasury_series_for_curve(2.0, 4.15),
+                10.0: treasury_series_for_curve(10.0, 4.63),
+            },
+            observation_date="2026-08-13",
+            requested_maturities=[0.25, 1.0, 2.0, 10.0],
+        )
+
+        self.assertEqual(
+            [point["maturity_years"] for point in result.observed], [0.25, 2.0, 10.0]
+        )
+        self.assertEqual(result.missing, [{"maturity_years": 1.0, "reason": "not_observed"}])
+        self.assertEqual(result.calculated, [])
+        self.assertEqual(result.receipt["observation_date"], "2026-08-13T00:00:00+00:00")
+
+    def test_curve_observation_preserves_its_evidence_metadata(self) -> None:
+        result = build_yield_curve(
+            {0.25: treasury_series_for_curve(0.25, 3.87)},
+            observation_date="2026-08-13",
+            requested_maturities=[0.25],
+        )
+
+        point = result.observed[0]
+        self.assertEqual(point["observation_date"], "2026-08-13T00:00:00+00:00")
+        self.assertEqual(point["unit"], "Percent")
+        self.assertEqual(point["qualifiers"]["maturity_duration"], "3Month")
+        self.assertEqual(point["source_names"], ["FRED (Federal Reserve Economic Data)"])
+
+    def test_curve_interpolation_is_calculation_and_never_extrapolates(self) -> None:
+        result = build_yield_curve(
+            {
+                2.0: treasury_series_for_curve(2.0, 4.0),
+                10.0: treasury_series_for_curve(10.0, 5.0),
+            },
+            observation_date="2026-08-13",
+            requested_maturities=[1.0, 5.0, 20.0],
+            interpolate=True,
+        )
+
+        self.assertEqual(result.calculated[0]["maturity_years"], 5.0)
+        self.assertEqual(result.calculated[0]["role"], "calculation")
+        self.assertAlmostEqual(result.calculated[0]["value"], 4.375)
+        self.assertEqual(
+            [item["maturity_years"] for item in result.missing],
+            [1.0, 20.0],
+        )
+
+    def test_curve_does_not_carry_a_prior_date_forward(self) -> None:
+        evidence = normalize_treasury_envelope(
+            treasury_envelope(
+                evidence_kind="us_treasury_current",
+                observations=[treasury_observation("2026-08-12T00:00:00+00:00", 4.63)],
+            )
+        )
+        result = build_yield_curve(
+            {10.0: evidence},
+            observation_date="2026-08-13",
+            requested_maturities=[10.0],
+        )
+        self.assertEqual(result.observed, [])
+        self.assertEqual(result.missing[0]["reason"], "not_observed")
+
+    def test_historical_curve_uses_only_exact_common_dates(self) -> None:
+        two_year = normalize_treasury_envelope(
+            treasury_envelope(
+                maturity_duration="2Year",
+                maturity_years=2.0,
+                observations=[
+                    treasury_observation("2026-08-12T00:00:00+00:00", 4.10),
+                    treasury_observation("2026-08-13T00:00:00+00:00", 4.15),
+                ],
+            )
+        )
+        ten_year = normalize_treasury_envelope(
+            treasury_envelope(
+                maturity_duration="10Year",
+                maturity_years=10.0,
+                observations=[
+                    treasury_observation("2026-08-13T00:00:00+00:00", 4.63),
+                    treasury_observation("2026-08-14T00:00:00+00:00", 4.64),
+                ],
+            )
+        )
+
+        result = build_historical_yield_curve({2.0: two_year, 10.0: ten_year})
+
+        self.assertEqual(list(result.frame.columns), [2.0, 10.0])
+        self.assertEqual(len(result.frame), 1)
+        self.assertEqual(result.frame.index[0].isoformat(), "2026-08-13T00:00:00+00:00")
+        self.assertEqual(result.receipt["alignment"], "exact_common_dates")
+
+
+class RiskFreeRateTests(unittest.TestCase):
+    def test_annual_percent_converts_to_weekly_periodic_rate(self) -> None:
+        treasury = normalize_treasury_envelope(
+            treasury_envelope(
+                security_type="Bill",
+                maturity_duration="3Month",
+                maturity_years=0.25,
+                observations=[
+                    treasury_observation("2026-01-02T00:00:00+00:00", 5.0),
+                    treasury_observation("2026-01-09T00:00:00+00:00", 5.2),
+                ],
+            )
+        )
+        result = align_periodic_risk_free(
+            treasury,
+            pd.to_datetime(["2026-01-02T00:00:00+00:00", "2026-01-09T00:00:00+00:00"]),
+            periods_per_year=52,
+        )
+
+        self.assertAlmostEqual(result.series.iloc[0], (1.05 ** (1.0 / 52.0)) - 1.0)
+        self.assertEqual(result.receipt["conversion"], "effective_annual_to_periodic")
+        self.assertEqual(result.receipt["max_fill_days"], 3)
+
+    def test_negative_yield_above_minus_one_hundred_percent_is_supported(self) -> None:
+        treasury = normalize_treasury_envelope(
+            treasury_envelope(
+                observations=[
+                    treasury_observation("2026-01-02T00:00:00+00:00", -0.50),
+                    treasury_observation("2026-01-09T00:00:00+00:00", -0.40),
+                ]
+            )
+        )
+        result = align_periodic_risk_free(
+            treasury,
+            pd.to_datetime(["2026-01-02T00:00:00+00:00"]),
+            periods_per_year=252,
+        )
+        self.assertLess(result.series.iloc[0], 0.0)
+
+    def test_alignment_carries_at_most_three_calendar_days(self) -> None:
+        treasury = normalize_treasury_envelope(
+            treasury_envelope(
+                observations=[
+                    treasury_observation("2026-01-02T00:00:00+00:00", 5.0),
+                    treasury_observation("2026-01-09T00:00:00+00:00", 5.2),
+                ]
+            )
+        )
+        result = align_periodic_risk_free(
+            treasury,
+            pd.to_datetime(["2026-01-05T00:00:00+00:00"]),
+            periods_per_year=252,
+        )
+        self.assertEqual(result.receipt["filled_observation_count"], 1)
+
+        with self.assertRaisesRegex(DataGateError, "treasury_alignment_failed"):
+            align_periodic_risk_free(
+                treasury,
+                pd.to_datetime(["2026-01-06T00:00:00+00:00"]),
+                periods_per_year=252,
+            )
 
 
 if __name__ == "__main__":

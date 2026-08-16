@@ -7,6 +7,7 @@ import math
 from numbers import Real
 from typing import Any, Mapping, Sequence
 
+import numpy as np
 import pandas as pd
 
 from . import DataGateError
@@ -36,6 +37,26 @@ SUPPORTED_EVIDENCE_KINDS = frozenset(
 class TreasurySeries:
     series: pd.Series
     maturity_years: float
+    receipt: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class YieldCurveResult:
+    observed: list[dict[str, Any]]
+    missing: list[dict[str, Any]]
+    calculated: list[dict[str, Any]]
+    receipt: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class HistoricalYieldCurveResult:
+    frame: pd.DataFrame
+    receipt: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RiskFreeResult:
+    series: pd.Series
     receipt: dict[str, Any]
 
 
@@ -374,6 +395,306 @@ def normalize_treasury_envelope(envelope: Mapping[str, Any]) -> TreasurySeries:
     return TreasurySeries(series=series, maturity_years=maturity_years, receipt=receipt)
 
 
+def _validated_treasury_series_by_maturity(
+    series_by_maturity: Mapping[float, TreasurySeries],
+) -> list[tuple[float, TreasurySeries]]:
+    validated: list[tuple[float, TreasurySeries]] = []
+    for mapping_maturity, treasury in series_by_maturity.items():
+        if (
+            isinstance(mapping_maturity, bool)
+            or not isinstance(mapping_maturity, Real)
+            or not math.isfinite(float(mapping_maturity))
+            or float(mapping_maturity) <= 0
+            or not isinstance(treasury, TreasurySeries)
+            or float(mapping_maturity) != treasury.maturity_years
+        ):
+            raise DataGateError(
+                "treasury_alignment_failed",
+                "Treasury maturity mapping must match the evidence numeric maturity_years.",
+                {
+                    "mapping_maturity": mapping_maturity,
+                    "evidence_maturity": (
+                        treasury.maturity_years if isinstance(treasury, TreasurySeries) else None
+                    ),
+                },
+            )
+        validated.append((float(mapping_maturity), treasury))
+    return sorted(validated, key=lambda item: item[0])
+
+
+def _curve_receipt_series_metadata(
+    validated: Sequence[tuple[float, TreasurySeries]],
+) -> tuple[dict[float, list[str]], dict[float, dict[str, Any]]]:
+    return (
+        {maturity: list(treasury.receipt["source_names"]) for maturity, treasury in validated},
+        {maturity: dict(treasury.receipt["qualifiers"]) for maturity, treasury in validated},
+    )
+
+
+def build_yield_curve(
+    series_by_maturity: Mapping[float, TreasurySeries],
+    observation_date: str,
+    requested_maturities: Sequence[float],
+    interpolate: bool = False,
+) -> YieldCurveResult:
+    """Assemble exact-date Treasury observations, with explicit optional calculations."""
+    target_date = _utc_timestamp(observation_date, "yield curve observation_date").normalize()
+    validated = _validated_treasury_series_by_maturity(series_by_maturity)
+    source_names, qualifiers = _curve_receipt_series_metadata(validated)
+
+    observed: list[dict[str, Any]] = []
+    for maturity, treasury in validated:
+        if target_date in treasury.series.index:
+            observed.append(
+                {
+                    "maturity_years": maturity,
+                    "value": float(treasury.series.loc[target_date]),
+                    "role": "observation",
+                    "observation_date": target_date.isoformat(),
+                    "unit": treasury.receipt["unit"],
+                    "qualifiers": dict(treasury.receipt["qualifiers"]),
+                    "source_names": list(treasury.receipt["source_names"]),
+                }
+            )
+
+    observed_by_maturity = {point["maturity_years"]: point["value"] for point in observed}
+    missing: list[dict[str, Any]] = []
+    calculated: list[dict[str, Any]] = []
+    for requested_maturity in requested_maturities:
+        if (
+            isinstance(requested_maturity, bool)
+            or not isinstance(requested_maturity, Real)
+            or not math.isfinite(float(requested_maturity))
+            or float(requested_maturity) <= 0
+        ):
+            raise DataGateError(
+                "treasury_alignment_failed",
+                "Requested Treasury maturities must be positive finite numeric years.",
+                {"maturity_years": requested_maturity},
+            )
+        target_years = float(requested_maturity)
+        if target_years in observed_by_maturity:
+            continue
+
+        if interpolate:
+            left = next(
+                (
+                    point
+                    for point in reversed(observed)
+                    if float(point["maturity_years"]) < target_years
+                ),
+                None,
+            )
+            right = next(
+                (
+                    point
+                    for point in observed
+                    if float(point["maturity_years"]) > target_years
+                ),
+                None,
+            )
+            if left is not None and right is not None:
+                left_years = float(left["maturity_years"])
+                right_years = float(right["maturity_years"])
+                left_value = float(left["value"])
+                right_value = float(right["value"])
+                value = left_value + (
+                    (target_years - left_years)
+                    / (right_years - left_years)
+                    * (right_value - left_value)
+                )
+                calculated.append(
+                    {
+                        "maturity_years": target_years,
+                        "value": value,
+                        "role": "calculation",
+                        "method": "linear_maturity_interpolation",
+                        "bounding_maturities": [left_years, right_years],
+                    }
+                )
+                continue
+        missing.append({"maturity_years": target_years, "reason": "not_observed"})
+
+    return YieldCurveResult(
+        observed=observed,
+        missing=missing,
+        calculated=calculated,
+        receipt={
+            "observation_date": target_date.isoformat(),
+            "source_names": source_names,
+            "qualifiers": qualifiers,
+        },
+    )
+
+
+def build_historical_yield_curve(
+    series_by_maturity: Mapping[float, TreasurySeries],
+) -> HistoricalYieldCurveResult:
+    """Join Treasury yields only on dates observed by every requested maturity."""
+    validated = _validated_treasury_series_by_maturity(series_by_maturity)
+    if not validated:
+        raise DataGateError(
+            "treasury_alignment_failed",
+            "A historical Treasury curve requires at least one maturity series.",
+        )
+    maturities = [maturity for maturity, _ in validated]
+    frame = pd.concat(
+        [treasury.series.rename(maturity) for maturity, treasury in validated],
+        axis=1,
+        join="inner",
+    ).sort_index()
+    if frame.empty:
+        raise DataGateError(
+            "treasury_alignment_failed",
+            "Treasury maturities have no exact common observation dates.",
+            {"maturities": maturities},
+        )
+
+    source_names, qualifiers = _curve_receipt_series_metadata(validated)
+    return HistoricalYieldCurveResult(
+        frame=frame,
+        receipt={
+            "alignment": "exact_common_dates",
+            "maturities": maturities,
+            "common_observation_count": len(frame),
+            "first_date": frame.index.min().isoformat(),
+            "last_date": frame.index.max().isoformat(),
+            "qualifiers": qualifiers,
+            "source_names": source_names,
+        },
+    )
+
+
+def _utc_datetime_index(value: pd.DatetimeIndex, label: str) -> pd.DatetimeIndex:
+    if not isinstance(value, pd.DatetimeIndex) or value.empty:
+        raise DataGateError(
+            "treasury_alignment_failed",
+            f"{label} must be a non-empty DatetimeIndex.",
+        )
+    try:
+        normalized = pd.to_datetime(value, utc=True)
+    except Exception as exc:
+        raise DataGateError(
+            "treasury_alignment_failed",
+            f"{label} must contain valid timestamps.",
+            {"error_type": exc.__class__.__name__},
+        ) from exc
+    return pd.DatetimeIndex(normalized).sort_values()
+
+
+def align_periodic_risk_free(
+    annual_percent: TreasurySeries,
+    return_index: pd.DatetimeIndex,
+    periods_per_year: int,
+    max_fill_days: int = 3,
+) -> RiskFreeResult:
+    """Align annual Treasury yields without look-ahead and convert to periodic rates."""
+    if (
+        isinstance(periods_per_year, bool)
+        or not isinstance(periods_per_year, int)
+        or periods_per_year <= 0
+    ):
+        raise DataGateError(
+            "treasury_alignment_failed",
+            "periods_per_year must be a positive integer.",
+            {"periods_per_year": periods_per_year},
+        )
+    if (
+        isinstance(max_fill_days, bool)
+        or not isinstance(max_fill_days, int)
+        or not 0 <= max_fill_days <= 3
+    ):
+        raise DataGateError(
+            "treasury_alignment_failed",
+            "max_fill_days must be an integer from zero through three.",
+            {"max_fill_days": max_fill_days},
+        )
+    if not isinstance(annual_percent, TreasurySeries):
+        raise DataGateError(
+            "treasury_alignment_failed",
+            "Risk-free alignment requires normalized Treasury yield evidence.",
+        )
+
+    qualifiers = dict(annual_percent.receipt["qualifiers"])
+    if qualifiers.get("time_series_operator") is not None:
+        raise DataGateError(
+            "treasury_alignment_failed",
+            "A Treasury change series cannot be used as a risk-free yield level.",
+            {"time_series_operator": qualifiers["time_series_operator"]},
+        )
+    treasury_series = annual_percent.series.copy().sort_index()
+    treasury_series.index = _utc_datetime_index(
+        pd.DatetimeIndex(treasury_series.index), "Treasury observation index"
+    )
+    if (treasury_series <= -100.0).any():
+        raise DataGateError(
+            "treasury_alignment_failed",
+            "Treasury annual percentage yields must be greater than -100.",
+        )
+    aligned_index = _utc_datetime_index(return_index, "return_index")
+    source_index = pd.DatetimeIndex(treasury_series.index)
+    positions = source_index.searchsorted(aligned_index, side="right") - 1
+    if (positions < 0).any():
+        first_missing = aligned_index[int(np.flatnonzero(positions < 0)[0])]
+        raise DataGateError(
+            "treasury_alignment_failed",
+            "No Treasury observation exists on or before a return date.",
+            {"return_date": first_missing.isoformat()},
+        )
+
+    source_dates = source_index.take(positions)
+    source_ages = (aligned_index.normalize() - source_dates.normalize()).days
+    if (source_ages > max_fill_days).any():
+        first_expired = int(np.flatnonzero(source_ages > max_fill_days)[0])
+        raise DataGateError(
+            "treasury_alignment_failed",
+            "Treasury yield forward fill exceeds the permitted calendar-day limit.",
+            {
+                "return_date": aligned_index[first_expired].isoformat(),
+                "source_date": source_dates[first_expired].isoformat(),
+                "source_age_days": int(source_ages[first_expired]),
+                "max_fill_days": max_fill_days,
+            },
+        )
+
+    aligned_annual_percent = pd.Series(
+        treasury_series.iloc[positions].to_numpy(), index=aligned_index, dtype=float
+    )
+    annual_decimal = aligned_annual_percent.astype(float) / 100.0
+    periodic = np.power(1.0 + annual_decimal, 1.0 / periods_per_year) - 1.0
+    periodic.name = "risk_free_periodic"
+    direct_observation_count = int((source_ages == 0).sum())
+    source_date_receipt = [
+        {
+            "return_date": return_date.isoformat(),
+            "source_date": source_date.isoformat(),
+            "source_age_days": int(source_age),
+        }
+        for return_date, source_date, source_age in zip(
+            aligned_index, source_dates, source_ages, strict=True
+        )
+    ]
+    return RiskFreeResult(
+        series=periodic,
+        receipt={
+            "conversion": "effective_annual_to_periodic",
+            "periods_per_year": periods_per_year,
+            "max_fill_days": max_fill_days,
+            "aligned_first_date": aligned_index.min().isoformat(),
+            "aligned_last_date": aligned_index.max().isoformat(),
+            "direct_observation_count": direct_observation_count,
+            "filled_observation_count": len(aligned_index) - direct_observation_count,
+            "source_dates": source_date_receipt,
+            "qualifiers": qualifiers,
+            "source_names": list(annual_percent.receipt["source_names"]),
+            "note": (
+                "Effective annual-to-periodic conversion is a disclosed analysis convention "
+                "applied to the provider's annual percentage yield."
+            ),
+        },
+    )
+
+
 __all__ = [
     "SUPPORTED_DUE_DATES",
     "SUPPORTED_EVIDENCE_KINDS",
@@ -381,6 +702,12 @@ __all__ = [
     "SUPPORTED_MARKETS",
     "SUPPORTED_OPERATORS",
     "SUPPORTED_SECURITY_TYPES",
+    "HistoricalYieldCurveResult",
+    "RiskFreeResult",
     "TreasurySeries",
+    "YieldCurveResult",
+    "align_periodic_risk_free",
+    "build_historical_yield_curve",
+    "build_yield_curve",
     "normalize_treasury_envelope",
 ]
