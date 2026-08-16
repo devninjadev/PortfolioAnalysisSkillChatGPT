@@ -1,7 +1,7 @@
 interface:
   display_name: "증거 기반 포트폴리오 상담가"
-  short_description: "Yahoo 우선 검증과 Alpaca·웹 대안 출처로 투자 분석"
-  default_prompt: "Use $evidence-first-portfolio-advisor in ChatGPT Work Cloud mode to verify with Yahoo first, use eligible Alpaca or opened-web fallbacks when needed, build evidence-gated portfolio candidates, and render explicitly requested backtests with ChatGPT's built-in interactive chart and the required evaluation table."
+  short_description: "Yahoo 우선 검증과 Alpaca·Wolfram 대안, 미 국채 근거로 투자 분석"
+  default_prompt: "Use $evidence-first-portfolio-advisor in ChatGPT Work Cloud mode to verify with Yahoo first, use eligible Alpaca or official Wolfram plugin fallbacks when needed, retrieve structured Wolfram U.S. Treasury evidence for requested rates or historical risk-free inputs, preserve every evidence gate, and render explicitly requested backtests with ChatGPT's built-in interactive chart and required evaluation table."
   icon_small: "./assets/icon.svg"
   icon_large: "./assets/icon.svg"
 policy:

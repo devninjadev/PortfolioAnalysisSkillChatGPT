@@ -45,3 +45,14 @@ Yahoo 검색이 현지어를 받지 못할 수 있다. 예를 들어 `삼성전�
 | 한국 주식 | `005930.KS` | 없음 | Alpaca 자산 조회에서 찾을 수 없음 | Alpaca 호출 대상이 아니며 Yahoo 실패 유지 |
 
 실제 AAPL 주간 원시 bar는 2020년 4대1 액면분할 경계에서 약 `499.345`에서 `121.11`로 불연속이었다. 따라서 미국 주식 폴백은 기업행동 응답 없이 절대 포트폴리오 수익률에 들어가지 않는다. BTC/USD는 기업행동 조정을 요구하지 않지만, Yahoo의 통화 메타데이터와 필요한 FX 이력은 계속 별도로 통과해야 한다.
+
+## 2026-08-16 Wolfram 대안 경로 검증
+
+아래는 영구 지원 목록이 아니라 2026-08-16에 official Wolfram plugin의 구조화 결과와 source annotation으로 확인한 **dated canary**다. 실제 분석에서는 Yahoo 실패·정확한 entity·property·기간·source annotation·Yahoo FX 게이트를 다시 검증하며, 이 표의 결과를 미래 가용성 약속이나 허용 목록으로 사용하지 않는다.
+
+- **dated canary — 금융 adjusted history:** AAPL은 `Entity["Financial", "NASDAQ:AAPL"]`로 해석됐고, 날짜가 있는 USD `AdjustedClose` 시계열을 반환했다.
+- **dated canary — 금융 source annotation:** 위 AAPL adjusted series의 Wolfram source annotation에는 Finnhub Stock API와 Nasdaq Data Link가 이름으로 남았다.
+- **dated canary — 명목 미국 국채 constant-maturity history:** 1개월, 3개월, 6개월, 1년, 2년, 3년, 5년, 7년, 10년, 20년, 30년의 daily constant-maturity history가 2025-01-02부터 2026-08-13까지 404개 관측치로 반환됐다.
+- **dated canary — 현재 미국 국채 수준:** 5년 및 10년 TIPS, 3개월 `AuctionAverage` bill, 3개월 `SecondaryMarket` bill 현재값이 반환됐다.
+- **dated canary — Treasury source annotation:** Treasury property의 source annotation은 FRED at the Federal Reserve Bank of St. Louis를 이름으로 표시했다.
+- **dated canary — unavailable maturity:** 2개월과 4개월 constant-maturity probe는 `Missing`을 반환했으며 계속 unavailable이다. 요청 시 nearby maturity로 대체하지 않는다.

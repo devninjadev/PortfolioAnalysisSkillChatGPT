@@ -6,6 +6,7 @@
 - `requirements.txt`의 `yfinance`, `pandas`, `numpy`, `scipy`.
 - Yahoo Finance 및 검증할 뉴스·공시 원문 도메인으로의 HTTPS 접근.
 - 미국 주식·크립토 가격 폴백을 실제로 쓸 때는 연결된 Alpaca 플러그인. Python 패키지나 Alpaca 계정 자격증명은 요구하지 않는다.
+- Yahoo 실패 가격 또는 미국 국채 증거를 실제로 쓸 때는 연결된 official Wolfram plugin. 별도 Wolfram HTTP 경로, SDK, MCP 서버, 공개 웹페이지, 스크래핑, API 키는 이 계약의 실행 경로가 아니다.
 - 재현 가능한 분석을 위해 실행 시각, 인수, 오류 JSON을 보존할 수 있는 파일 공간.
 
 CLI는 시작할 때 네 패키지의 import를 검사한다. 하나라도 없으면 같은 Python 인터프리터로 `requirements.txt`를 격리된 런타임 디렉터리에 자동 설치하고, 그 경로를 import 경로의 맨 앞에 추가한 뒤 네 패키지를 전부 다시 검사한다. 첫 `ModuleNotFoundError`는 오류가 아니라 설치 트리거다. 기존 패키지가 모두 import되면 설치를 생략한다.
@@ -56,12 +57,12 @@ Yahoo 재무·밸류에이션 또는 뉴스 조회가 실패하면 웹 검색은
 
 | 데이터 | 우선 출처 | 허용 대안 | 대안 없음 |
 |---|---|---|---|
-| 최근·과거 가격 | Yahoo 조정 가격 | Alpaca: 의미상 확인된 미국 주식 또는 크립토 | 한국 주식과 그 밖의 시장 |
+| 최근·과거 가격 | Yahoo 조정 가격 | Alpaca: 의미상 확인된 미국 주식 또는 크립토, 그 외 또는 Alpaca 실패 후 exact Financial entity의 Wolfram | 최종 검증 공급자를 정하지 못하면 해당 자산 중단 |
 | 통화 메타데이터·FX | Yahoo | 없음 | 필수 환율이 없으면 계산 중단 |
 | 재무·밸류에이션 | Yahoo | 검색 후 연 원문 | 확인하지 못한 필드는 `null` |
 | 뉴스 | Yahoo 발견 후보 | 검색 후 연 원문 | 확인하지 못한 사건은 주장하지 않음 |
 
-Yahoo 가격이 성공한 심볼은 Alpaca로 중복 조회하지 않는다. 가격 폴백 대상은 LLM이 사용자 전체 문맥과 구조화된 Yahoo 후보 메타데이터로 `us_equity`, `crypto`, `unsupported_market`, `ambiguous` 중 하나로 의미 분류한다. 접미사·구분자·정규식·고정 국가 목록으로 분류하지 않는다. 결정론적 어댑터는 앞의 두 클래스만 받으며, 제안된 Alpaca 심볼을 실제 도구 응답에서 다시 확인한다.
+Yahoo 가격이 성공한 심볼은 Alpaca 또는 Wolfram으로 중복 조회하지 않는다. 가격 폴백 대상은 LLM이 사용자 전체 문맥과 구조화된 Yahoo 후보 메타데이터로 `us_equity`, `crypto`, `unsupported_market`, `ambiguous` 중 하나로 의미 분류한다. 접미사·구분자·정규식·고정 국가 목록으로 분류하지 않는다. `us_equity`와 `crypto`만 Alpaca를 먼저 시도하며, 결정론적 어댑터는 그 두 클래스만 받는다. Alpaca가 의미상 대상이 아니거나, 연결되지 않았거나, 불완전하거나, 증거 게이트에서 실패하면 exact Financial entity를 확인할 수 있는 경우에만 official Wolfram plugin을 다음 대안으로 쓴다. Yahoo 통화 메타데이터와 FX는 모든 자산에 계속 필수다.
 
 ### Alpaca 증거 봉투
 
@@ -96,11 +97,99 @@ Alpaca는 Python 라이브러리가 아니라 ChatGPT가 호출하는 플러그�
 
 이 안내는 Yahoo 가격이 성공한 경우, 한국 주식, 지원하지 않는 시장, 종목이 모호한 경우, 가격과 무관한 요청에는 표시하지 않는다.
 
+### Wolfram 금융 증거 봉투
+
+Wolfram은 연결된 official Wolfram plugin이 반환한 구조화된 Wolfram Language 결과와 source annotation만으로 사용한다. ChatGPT가 다음 스키마 버전 1 봉투에 값을 보존하고 `wolfram-validate`로 검증한다. CLI는 봉투만 검증하며 Wolfram을 호출하지 않는다. 직접 HTTP, Python SDK, 별도 MCP, 공개 웹페이지, 스크래핑, 이미지 추출, API 키 요청은 금지다.
+
+```json
+{
+  "schema_version": 1,
+  "provider": "wolfram",
+  "evidence_kind": "financial_history",
+  "symbol": "AAPL",
+  "provider_entity": "NASDAQ:AAPL",
+  "requested_property": "AdjustedClose",
+  "required_price_basis": "adjusted_total_return",
+  "classification_evidence": {
+    "yahoo_symbol": "AAPL",
+    "expected_provider_currency": "USD",
+    "identity_decision": "match",
+    "matched_fields": ["symbol", "security_type", "currency"],
+    "conflicts": []
+  },
+  "primary_failure": {
+    "provider": "yahoo",
+    "code": "price_history_unavailable",
+    "message": "Yahoo returned no usable price history."
+  },
+  "request": {"start": "2021-01-01", "end": "2026-08-15"},
+  "result": {
+    "entity_type": "Financial",
+    "entity": "NASDAQ:AAPL",
+    "symbol": "AAPL",
+    "exchange": "NASDAQ",
+    "security_type": "Equity",
+    "currency": "USD",
+    "property": "AdjustedClose",
+    "unit": "USDollars",
+    "observations": [
+      {"timestamp": "2026-08-13T00:00:00+00:00", "value": 230.0},
+      {"timestamp": "2026-08-14T00:00:00+00:00", "value": 231.0}
+    ]
+  },
+  "sources": [{"name": "Named provider from Wolfram annotation", "url": "https://example.invalid/source"}],
+  "retrieved_at": "2026-08-16T00:00:00+00:00"
+}
+```
+
+`entity_type` must be `Financial`; declared and returned entity/symbol/currency/identity evidence must agree, observations must be finite positive dated structured values, and source annotations need a non-empty provider name. The returned property must equal `requested_property`. `Price`, `LatestTrade`, and `Close` may satisfy only `recent_price`; only `AdjustedClose` satisfies `adjusted_total_return`. Therefore every total-return backtest, MPT computation, and other return calculation using Wolfram requires `AdjustedClose`; recent-price properties and `RawClose` are never substitutes.
+
+If the plugin is unavailable, identity is not exact, property/coverage/source evidence is missing, or structured output is unusable, preserve the error (`wolfram_plugin_unavailable`, `wolfram_entity_mismatch`, `wolfram_property_unavailable`, `wolfram_source_unavailable`, or `wolfram_schema_error`) and stop that affected asset. Do not convert rendered tables or images into numeric evidence.
+
+### U.S. Treasury Wolfram evidence envelope
+
+U.S. Treasury evidence also comes only from the official Wolfram plugin. The LLM emits the requested structured qualifiers; the deterministic harness accepts the documented vocabulary but does not infer a qualifier from a text parser. A complete nominal 3-month daily constant-maturity history envelope is:
+
+```json
+{
+  "schema_version": 1,
+  "provider": "wolfram",
+  "evidence_kind": "us_treasury_history",
+  "country_entity": "UnitedStates",
+  "qualifiers": {
+    "security_type": "Bill",
+    "maturity_duration": "3Month",
+    "market": null,
+    "due_date": "ConstantMaturity",
+    "frequency": "Daily",
+    "time_series_operator": null,
+    "coupon_rate": null
+  },
+  "request": {"start": "2021-01-01", "end": "2026-08-15"},
+  "result": {
+    "property": "Treasury",
+    "maturity_years": 0.25,
+    "unit": "Percent",
+    "observations": [
+      {"timestamp": "2026-08-13T00:00:00+00:00", "value": 4.55},
+      {"timestamp": "2026-08-14T00:00:00+00:00", "value": 4.54}
+    ],
+    "missing": []
+  },
+  "sources": [{"name": "FRED (Federal Reserve Economic Data)", "organization": "Federal Reserve Bank of St. Louis", "url": "https://fred.stlouisfed.org/"}],
+  "retrieved_at": "2026-08-16T00:00:00+00:00"
+}
+```
+
+`security_type` and non-empty semantic `maturity_duration` are required. Known `security_type` values are `Bill`, `Note`, `Bond`, and `TIPS`. `market` is optional and, when present, is `AuctionAverage` or `SecondaryMarket`; `due_date` is optional and, when present, is `ConstantMaturity`; `frequency` is optional and, when present, is one of `Daily`, `Weekly`, `BiWeekly`, `Monthly`, `Quarterly`, or `Annual`; `time_series_operator` is optional and, when present, is `Change`, `ChangeRate`, `AnnualChange`, `AnnualizedChangeRate`, or `YearOverYearChangeRate`; `coupon_rate` is optional and finite when present. Declared, request, and result qualifiers must agree exactly. `evidence_kind` is `us_treasury_current` (at least one observation) or `us_treasury_history` (at least two observations); country is exactly `UnitedStates`, property is `Treasury`, and unit is `Percent`.
+
+Preserve Wolfram `Missing` in `result.missing`. An empty result with the requested maturity marked unavailable is `treasury_maturity_unavailable`; another empty series is `treasury_series_unavailable`. Never replace either result with a nearby maturity. A curve returns direct `observation` values separately from explicit `calculation` values: only an opt-in, bounded linear maturity interpolation may be labelled `linear_maturity_interpolation`, never represented as observed evidence.
+
 ### 혼합 공급자 워크스페이스
 
-`prepare-portfolio`는 심볼별 Yahoo 성공 가격과 통화, Yahoo FX, 영수증, 실패를 스키마 버전 1 JSON에 원자적으로 저장한다. 따라서 한 종목의 실패가 다른 종목의 성공 증거를 지우지 않는다. 출력의 `fallback_required_symbols`만 의미 분류 및 Alpaca 호출 대상으로 검토한다.
+`prepare-portfolio`는 심볼별 Yahoo 성공 가격과 통화, Yahoo FX, 영수증, 실패를 스키마 버전 1 JSON에 원자적으로 저장한다. 따라서 한 종목의 실패가 다른 종목의 성공 증거를 지우지 않는다. 출력의 `fallback_required_symbols`만 LLM 의미 분류와 Alpaca-then-Wolfram 대안 검토 대상으로 삼는다.
 
-`complete-portfolio`는 실패한 각 심볼에 정확히 하나의 검증된 Alpaca 봉투를 요구한다. 요청하지 않은 봉투, 중복 봉투, 미해결 필수 종목, 빠진 Yahoo FX는 모두 전체 비중 계산을 막는다. 성공하면 각 자산의 공급자를 `download_receipt.providers`에 기록하고 기존 수익률·최적화 게이트를 그대로 실행한다.
+`complete-portfolio`는 실패한 각 심볼에 정확히 하나의 검증된 Alpaca 또는 Wolfram 봉투를 요구한다. 요청하지 않은 봉투, 중복 봉투, 하나의 자산에 대한 두 공급자, 미해결 필수 종목, 빠진 Yahoo FX는 모두 전체 비중 계산을 막는다. 성공하면 각 자산의 유일한 최종 공급자를 `download_receipt.providers`에 기록하고 기존 수익률·최적화 게이트를 그대로 실행한다.
 
 ## 수익률·포트폴리오 계약
 
@@ -115,6 +204,10 @@ Alpaca는 Python 라이브러리가 아니라 ChatGPT가 호출하는 플러그�
 - SLSQP 수렴 및 사후 제약 검증.
 
 동일가중은 `comparison_only`, 최소분산은 `portfolio_candidate_not_order_instruction` 역할을 가진다. 어느 게이트든 실패하면 결과 비중을 출력하지 않는다.
+
+### 무위험수익률 계약
+
+백테스트의 기본 위험무위험 대용치는 historical window를 덮는 United States 3-month Treasury bill, `ConstantMaturity`, `Daily` Wolfram 역사 시계열이다. 연간 Percent 수익률은 `effective_annual_to_periodic`이라는 공개 분석 규칙으로 `periodic = (1 + annual_percent / 100)^(1 / periods_per_year) - 1`로 변환한다. 이 변환은 공급자 사실이 아니라 명시된 분석 관례다. 과거 관측치는 미래를 보지 않고 최대 3 calendar days만 전진 정렬할 수 있다. 정확한 시리즈·source annotation·시의성 있는 관측치가 없으면 샤프, 소르티노, 알파 같은 의존 필드는 `null`과 `risk_free_rate_unavailable`을 유지한다.
 
 ## 백테스트 출력 계약
 
@@ -142,6 +235,6 @@ CLI 성공은 표준출력 JSON과 종료코드 0이다. 데이터 게이트 실
 
 의존성 오류 코드는 `requirements_missing`, `dependency_install_failed`, `dependency_import_failed`다. 주요 Yahoo·계산 오류 코드는 `candidate_not_returned`, `price_history_unavailable`, `fundamentals_unavailable`, `news_unavailable`, `currency_unavailable`, `fx_history_unavailable`, `insufficient_assets`, `insufficient_history`, `unsupported_currency`, `non_finite_returns`, `degenerate_covariance`, `infeasible_constraints`, `optimization_failed`, `network_error`다.
 
-폴백·증거 오류 코드는 `fallback_not_supported`, `fallback_class_ambiguous`, `alpaca_plugin_unavailable`, `alpaca_asset_not_found`, `alpaca_history_unavailable`, `alpaca_history_incomplete`, `alpaca_schema_error`, `corporate_actions_unavailable`, `corporate_action_adjustment_failed`, `evidence_workspace_invalid`, `web_evidence_unavailable`, `web_primary_source_unverified`다. 웹 관련 두 코드는 모델 오케스트레이션 계약이며 CLI가 검색을 직접 실행한다는 뜻이 아니다.
+폴백·증거 오류 코드는 `fallback_not_supported`, `fallback_class_ambiguous`, `alpaca_plugin_unavailable`, `alpaca_asset_not_found`, `alpaca_history_unavailable`, `alpaca_history_incomplete`, `alpaca_schema_error`, `corporate_actions_unavailable`, `corporate_action_adjustment_failed`, `wolfram_plugin_unavailable`, `wolfram_entity_mismatch`, `wolfram_property_unavailable`, `wolfram_source_unavailable`, `wolfram_schema_error`, `wolfram_qualifier_mismatch`, `wolfram_unit_mismatch`, `treasury_series_unavailable`, `treasury_maturity_unavailable`, `treasury_alignment_failed`, `risk_free_rate_unavailable`, `evidence_workspace_invalid`, `web_evidence_unavailable`, `web_primary_source_unverified`다. `wolfram_plugin_unavailable`과 `risk_free_rate_unavailable`은 ChatGPT 오케스트레이션/출력 계약의 상태 코드이며, 나머지 Wolfram/Treasury 게이트는 CLI 검증 결과일 수 있다. 웹 관련 두 코드는 모델 오케스트레이션 계약이며 CLI가 검색을 직접 실행한다는 뜻이 아니다.
 
 오류가 난 분석 부분만 중단한다. 단, 티커 검증 실패는 그 티커에 의존하는 가격·재무·뉴스·포트폴리오 분석 전체를 막는다.

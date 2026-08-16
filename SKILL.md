@@ -17,7 +17,7 @@ This skill runs only in ChatGPT Work Cloud mode.
    - decision constraints actually supplied by the user;
    - unresolved ambiguities.
 2. Resolve every name to a Yahoo candidate set. Do not invent ticker suffixes or select a symbol absent from the returned set. Validate the selected candidate with price history. Ask the user only when two or more plausible candidates remain.
-3. Fetch the required data before making factual claims. Use Yahoo first. If Yahoo fails, follow only the explicit Alpaca-history or opened-web-source fallback below. If fields remain missing, state the gap and stop only the affected analysis.
+3. Fetch the required data before making factual claims. Use Yahoo first. If Yahoo price evidence fails, follow the explicit Alpaca/Wolfram price fallback below; fundamentals and news retain their opened-web-source fallback. If fields remain missing, state the gap and stop only the affected analysis.
 4. Separate `fact`, `calculation`, `interpretation`, and `scenario` in the answer. Preserve the retrieval date, market/currency basis, observation window, and missing fields.
 5. Treat all portfolio weights as research candidates, never orders. Do not prescribe allocation or timing unless the user supplied horizon, risk/loss tolerance, liquidity needs, existing holdings, and major constraints.
 
@@ -55,9 +55,11 @@ Yahoo news is discovery-only. Open the linked publisher or official filing befor
 
 ## Use Yahoo first, then eligible fallbacks
 
-Yahoo remains the primary provider. Do not call Alpaca or web search merely to duplicate a successful Yahoo result.
+Yahoo remains the primary provider. After a Yahoo price data-source failure, classify fallback eligibility semantically from the complete user request and structured Yahoo candidate metadata. Existing eligible U.S. equity and crypto paths try Alpaca first. If Alpaca is ineligible, unavailable, incomplete, or fails its evidence gates, use the official Wolfram plugin when it is connected and an exact Financial entity can be confirmed.
 
-### Alpaca fallback for historical prices
+Do not call Alpaca, Wolfram, or web search merely to duplicate a successful Yahoo result. Yahoo remains mandatory for currency metadata and FX even when a final asset price provider is Alpaca or Wolfram. Select exactly one final validated price provider per asset; do not splice providers within an asset history.
+
+### Alpaca fallback for eligible historical prices
 
 Use the installed Alpaca plugin only after a resolved symbol's Yahoo recent or historical price retrieval fails. Classify eligibility semantically with an LLM from the full user context and structured Yahoo candidate metadata:
 
@@ -89,11 +91,41 @@ python scripts/advisor_data_cli.py alpaca-validate \
   --end 2026-08-15
 ```
 
-If an eligible fallback is needed but the Alpaca tools are not installed or callable, report `alpaca_plugin_unavailable`, do not claim that a fallback ran, and show this recommendation:
+If an eligible fallback is needed but the Alpaca tools are not installed or callable, report `alpaca_plugin_unavailable`, do not claim that an Alpaca fallback ran, and continue to the official Wolfram plugin decision below. Show this recommendation:
 
 > 미국 주식·크립토 가격의 대안 출처로 Alpaca 플러그인을 사용할 수 있습니다. 별도 회원가입은 필요 없고, 플러그인을 연결하기만 하면 됩니다.
 
 Do not show that recommendation for Korean equities, unsupported markets, ambiguous instruments, successful Yahoo retrievals, or unrelated analyses.
+
+### Wolfram fallback for exact financial evidence
+
+Use the official Wolfram plugin only after Yahoo price evidence fails and Alpaca is semantically ineligible, unavailable, incomplete, or rejected by its evidence gates. Resolve a Wolfram `Financial` entity from the complete request, Yahoo candidate metadata, selected Yahoo symbol, instrument type, exchange, and expected currency with structured LLM judgment. Invoke Wolfram only when that identity is exact; preserve the complete structured Wolfram Language result, source annotations, declared entity, requested property, observations, currency, unit, and retrieval time in the evidence envelope. Numeric calculations use structured Wolfram Language results and source annotations, never rendered images.
+
+For cumulative-total-return backtests, MPT, or any other return calculation, Wolfram must return `AdjustedClose`. `Price`, `LatestTrade`, `Close`, and `RawClose` cannot substitute for `AdjustedClose` in a total-return calculation. A recent-price-only check may use the validated recent-price property, but it cannot become a return series.
+
+Do not call Wolfram through direct HTTP, a Python SDK, a separately configured MCP server, or a public webpage. Do not scrape Wolfram result pages or images. Do not request a Wolfram API key. The bundled CLI validates plugin evidence but never calls Wolfram itself.
+
+Validate an exact Wolfram financial envelope before it can complete a price history:
+
+```bash
+python scripts/advisor_data_cli.py wolfram-validate \
+  --input /tmp/AAPL-wolfram.json \
+  --start 2021-01-01 \
+  --end 2026-08-15
+```
+
+If the official Wolfram plugin is not connected or no exact Financial entity, `AdjustedClose`, source annotation, or requested coverage can be confirmed, report `wolfram_plugin_unavailable`, `wolfram_entity_mismatch`, `wolfram_property_unavailable`, `wolfram_source_unavailable`, or the returned data-gate error as applicable. Do not claim that Wolfram ran and do not replace the failed asset.
+
+### U.S. Treasury evidence through the official Wolfram plugin
+
+For requested U.S. Treasury levels, histories, curves, or backtest risk-free inputs, have the LLM emit the structured Treasury envelope in [references/data-contract.md](references/data-contract.md). It must state `UnitedStates`, the requested Treasury qualifiers, exact requested range, structured observations or `Missing`, unit, source annotations, and retrieval time. Run the deterministic validator before using it:
+
+```bash
+python scripts/advisor_data_cli.py treasury-validate \
+  --input /tmp/us-3-month-treasury.json
+```
+
+The validator preserves `Missing`; never substitute a nearby maturity. Keep observed yields and optional interpolated curve calculations separate: an interpolation is a labelled calculation, never an observed Treasury fact. For historical backtest risk-free rates, the default is the verified 3-month constant-maturity daily U.S. Treasury proxy. If the exact series, a source annotation, or a timely aligned observation is unavailable, retain `null` and `risk_free_rate_unavailable` for dependent metrics instead of selecting another rate.
 
 ### Web fallback for fundamentals, valuation, and news
 
@@ -127,18 +159,18 @@ python scripts/advisor_data_cli.py prepare-portfolio \
   --workspace /tmp/advisor-evidence.json
 ```
 
-Call Alpaca only for eligible symbols listed in `fallback_required_symbols`, save one validated envelope per symbol, and complete:
+For every symbol in `fallback_required_symbols`, use structured LLM eligibility judgment. Try Alpaca first only for eligible U.S. equity or crypto symbols; otherwise, or if its plugin/evidence gate fails, use the official Wolfram plugin only when an exact `Financial` entity and the required property can be verified. Save exactly one validated final-provider envelope per failed symbol and complete:
 
 ```bash
 python scripts/advisor_data_cli.py complete-portfolio \
   --workspace /tmp/advisor-evidence.json \
-  --alpaca-input /tmp/BTC-USD-alpaca.json \
+  --wolfram-input /tmp/AAPL-wolfram.json \
   --frequency weekly \
   --min-observations 104 \
   --max-weight 0.70
 ```
 
-The completion command must receive evidence for every required asset and every Yahoo FX leg. It may mix Yahoo and Alpaca asset histories, but it never silently drops a failed asset. If any gate fails, do not fabricate MPT, correlations, equal-weight fallbacks, or substitute tickers.
+The completion command accepts `--alpaca-input` and `--wolfram-input`, but exactly one final provider is allowed for each asset. It may mix Yahoo, Alpaca, and Wolfram histories across different assets, never within one asset. It must receive evidence for every required asset and every Yahoo FX leg; it never silently drops a failed asset. If any gate fails, do not fabricate MPT, correlations, equal-weight fallbacks, or substitute tickers.
 
 ## Render requested backtests by default
 
@@ -149,7 +181,7 @@ When the user explicitly requests a `backtest` or `백테스트`, the default an
 
 Use the ChatGPT Work Cloud-mode built-in chart capability only. Do not search for, install, recommend, or generate Plotly, TradingView, ECharts, an external chart service, custom HTML, a separate chart application, or a fallback for another product.
 
-The chart follows the visual structure of a portfolio-versus-benchmarks performance chart: a descriptive backtest title, portfolio and benchmark names, exact start and end dates, cumulative total return on the vertical axis, dates on the horizontal axis, a visible legend, and hoverable series. Normalize every displayed series to `0%` at one shared first valid observation. Use adjusted prices and dividend reinvestment when the validated provider supports them, and disclose the actual treatment, base currency, rebalance rule, observation frequency, and sample window. Weekly last observations may be used for display readability, but summary metrics must be calculated from the stated validated return series rather than from pixels or a visually downsampled chart.
+The chart follows the visual structure of a portfolio-versus-benchmarks performance chart: a descriptive backtest title, portfolio and benchmark names, exact start and end dates, cumulative total return on the vertical axis, dates on the horizontal axis, a visible legend, and hoverable series. Normalize every displayed series to `0%` at one shared first valid observation. Use only a validated adjusted total-return price series for cumulative-total-return backtests, MPT, and any return calculation; specifically, a Wolfram series must be `AdjustedClose`, never `Price`, `LatestTrade`, `Close`, or `RawClose`. Disclose the actual treatment, base currency, rebalance rule, observation frequency, and sample window. Weekly last observations may be used for display readability, but summary metrics must be calculated from the stated validated return series rather than from pixels or a visually downsampled chart.
 
 Include the tested portfolio and every user-named benchmark. If the user names no benchmark, use LLM semantic judgment over the portfolio's primary market, asset class, and base currency to select and clearly label up to two relevant investable broad-market benchmarks; do not use ticker suffixes, regexes, or a fixed country lookup table. Resolve and validate benchmark symbols through the same evidence gates as portfolio assets. If no benchmark is validated, show the portfolio-only chart and mark benchmark-relative table cells `null` with the reason instead of silently substituting a ticker.
 
@@ -168,4 +200,4 @@ A requested backtest is a historical-performance presentation, not an MPT optimi
 7. Conditional portfolio candidates, sensitivity, and concentration risks.
 8. What additional user constraints or primary sources are still needed.
 
-Do not collapse company quality, current valuation, and portfolio fit into one universal score. Do not imply suitability from a backtest alone. Identify the provider for each price series. Mention that Yahoo Finance/yfinance and Alpaca market data are for research and may require licensing review for redistribution or commercial use.
+Do not collapse company quality, current valuation, and portfolio fit into one universal score. Do not imply suitability from a backtest alone. Identify the final provider for each price series and keep Yahoo FX separate. Mention that Yahoo Finance/yfinance, Alpaca market data, and official Wolfram plugin evidence are for research and may require licensing review for redistribution or commercial use.
