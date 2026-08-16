@@ -133,6 +133,14 @@ class TreasuryEnvelopeTests(unittest.TestCase):
         envelope["result"]["missing"] = [
             {"reason": "NotAvailable", "maturity_duration": "2Month"}
         ]
+        with self.assertRaisesRegex(DataGateError, "treasury_series_unavailable"):
+            normalize_treasury_envelope(envelope)
+
+    def test_requested_maturity_marker_is_maturity_unavailable(self) -> None:
+        envelope = treasury_envelope(observations=[])
+        envelope["result"]["missing"] = [
+            {"reason": "NotAvailable", "maturity_duration": "10Year"}
+        ]
         with self.assertRaisesRegex(DataGateError, "treasury_maturity_unavailable"):
             normalize_treasury_envelope(envelope)
 
@@ -247,6 +255,36 @@ class TreasuryEnvelopeTests(unittest.TestCase):
         envelope["qualifiers"]["coupon_rate"] = 2.875
         result = normalize_treasury_envelope(envelope)
         self.assertEqual(result.receipt["qualifiers"]["coupon_rate"], 2.875)
+
+    def test_numeric_strings_are_rejected_for_maturity_yield_and_coupon(self) -> None:
+        maturity_envelope = treasury_envelope(
+            observations=[
+                treasury_observation("2026-08-12", 4.55),
+                treasury_observation("2026-08-13", 4.63),
+            ]
+        )
+        maturity_envelope["result"]["maturity_years"] = "10.0"
+        with self.assertRaisesRegex(DataGateError, "wolfram_schema_error"):
+            normalize_treasury_envelope(maturity_envelope)
+
+        yield_envelope = treasury_envelope(
+            observations=[
+                treasury_observation("2026-08-12", "4.55"),
+                treasury_observation("2026-08-13", 4.63),
+            ]
+        )
+        with self.assertRaisesRegex(DataGateError, "wolfram_schema_error"):
+            normalize_treasury_envelope(yield_envelope)
+
+        coupon_envelope = treasury_envelope(
+            coupon_rate="2.875",  # type: ignore[arg-type]
+            observations=[
+                treasury_observation("2026-08-12", 4.55),
+                treasury_observation("2026-08-13", 4.63),
+            ]
+        )
+        with self.assertRaisesRegex(DataGateError, "wolfram_schema_error"):
+            normalize_treasury_envelope(coupon_envelope)
 
     def test_invalid_values_are_rejected(self) -> None:
         cases: list[tuple[str, object, str]] = [

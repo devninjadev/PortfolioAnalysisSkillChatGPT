@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from numbers import Real
 from typing import Any, Mapping, Sequence
 
 import pandas as pd
@@ -107,20 +108,13 @@ def _sources(value: Any) -> list[dict[str, Any]]:
 
 
 def _finite_number(value: Any, label: str, *, positive: bool = False) -> float:
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, Real):
         raise DataGateError(
             "wolfram_schema_error",
             f"Wolfram {label} must be a finite numeric value.",
             {"value": value},
         )
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError) as exc:
-        raise DataGateError(
-            "wolfram_schema_error",
-            f"Wolfram {label} must be a finite numeric value.",
-            {"value": value},
-        ) from exc
+    numeric = float(value)
     if not math.isfinite(numeric) or (positive and numeric <= 0):
         requirement = "positive finite" if positive else "finite"
         raise DataGateError(
@@ -278,7 +272,7 @@ def _missing_names_requested(missing: Sequence[Any], requested: str) -> bool:
     silently substituted for the requested series.
     """
     for item in missing:
-        if isinstance(item, Mapping) and "maturity_duration" in item:
+        if isinstance(item, Mapping) and item.get("maturity_duration") == requested:
             return True
         if isinstance(item, str) and item == requested:
             return True
