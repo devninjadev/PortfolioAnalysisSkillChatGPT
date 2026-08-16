@@ -16,7 +16,7 @@ sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 
 from advisor_data import DataGateError  # noqa: E402
 from advisor_data.market_data import MarketBundle  # noqa: E402
-from advisor_data_cli import main  # noqa: E402
+from advisor_data_cli import build_parser, main  # noqa: E402
 from tests.test_alpaca import bar, crypto_envelope  # noqa: E402
 from tests.test_treasury import treasury_envelope, treasury_observation  # noqa: E402
 from tests.test_wolfram import financial_envelope, observation  # noqa: E402
@@ -45,6 +45,18 @@ class FakeGateway:
 
 
 class CliTests(unittest.TestCase):
+    def test_complete_portfolio_help_is_provider_neutral(self) -> None:
+        parser = build_parser()
+        subparsers = next(
+            action for action in parser._actions if action.dest == "command"
+        )
+        help_text = subparsers.choices["complete-portfolio"].description or ""
+        summary = subparsers._choices_actions[
+            list(subparsers.choices).index("complete-portfolio")
+        ].help
+        self.assertIn("validated fallback evidence", f"{summary} {help_text}")
+        self.assertNotIn("Merge validated Alpaca evidence", f"{summary} {help_text}")
+
     def _write_json(self, directory: str, name: str, payload: dict) -> Path:
         path = Path(directory) / name
         path.write_text(json.dumps(payload), encoding="utf-8")

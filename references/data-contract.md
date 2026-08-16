@@ -111,11 +111,23 @@ Wolfram은 연결된 official Wolfram plugin이 반환한 구조화된 Wolfram L
   "requested_property": "AdjustedClose",
   "required_price_basis": "adjusted_total_return",
   "classification_evidence": {
-    "yahoo_symbol": "AAPL",
-    "expected_provider_currency": "USD",
-    "identity_decision": "match",
-    "matched_fields": ["symbol", "security_type", "currency"],
-    "conflicts": []
+    "yahoo_candidate": {
+      "symbol": "AAPL",
+      "exchange": "NASDAQ",
+      "issuer": "Apple Inc.",
+      "security_type": "Equity",
+      "share_class": "CommonStock",
+      "currency": "USD"
+    },
+    "wolfram_observed": {
+      "provider_entity": "NASDAQ:AAPL",
+      "symbol": "AAPL",
+      "exchange": "NASDAQ",
+      "issuer": "Apple Inc.",
+      "security_type": "Equity",
+      "share_class": "CommonStock",
+      "currency": "USD"
+    }
   },
   "primary_failure": {
     "provider": "yahoo",
@@ -128,10 +140,16 @@ Wolfram은 연결된 official Wolfram plugin이 반환한 구조화된 Wolfram L
     "entity": "NASDAQ:AAPL",
     "symbol": "AAPL",
     "exchange": "NASDAQ",
+    "issuer": "Apple Inc.",
     "security_type": "Equity",
+    "share_class": "CommonStock",
     "currency": "USD",
     "property": "AdjustedClose",
-    "unit": "USDollars",
+    "unit": {
+      "name": "USDollars",
+      "canonical_currency": "USD",
+      "quantity_kind": "monetary"
+    },
     "observations": [
       {"timestamp": "2026-08-13T00:00:00+00:00", "value": 230.0},
       {"timestamp": "2026-08-14T00:00:00+00:00", "value": 231.0}
@@ -142,7 +160,13 @@ Wolfram은 연결된 official Wolfram plugin이 반환한 구조화된 Wolfram L
 }
 ```
 
-`entity_type` must be `Financial`; declared and returned entity/symbol/currency/identity evidence must agree, observations must be finite positive dated structured values, and source annotations need a non-empty provider name. The returned property must equal `requested_property`. `Price`, `LatestTrade`, and `Close` may satisfy only `recent_price`; only `AdjustedClose` satisfies `adjusted_total_return`. Therefore every total-return backtest, MPT computation, and other return calculation using Wolfram requires `AdjustedClose`; recent-price properties and `RawClose` are never substitutes.
+`entity_type` must be `Financial`. `classification_evidence` must contain both structured `yahoo_candidate` and structured `wolfram_observed` identities. The validator deterministically compares symbol, provider entity, exchange, issuer/company, security type, `share_class` or `instrument_subtype`, and currency against the returned result; a bare model-authored `identity_decision: match` is never evidence. Every required field must be present and every available subtype field must agree.
+
+`result.unit` is structured monetary evidence rather than prose. `name`, `canonical_currency`, and `quantity_kind: monetary` are mandatory. The conservative unit mapping currently recognizes the observed Wolfram identifiers `USDollars → USD` and `Euros → EUR`; adding another currency requires an explicit deterministic unit mapping, not a country allowlist or a model assertion. A USD result paired with `Euros`, an unrecognized unit name, a string-only unit, or a mismatched canonical currency raises `wolfram_unit_mismatch`.
+
+The envelope `request.start` and `request.end` must equal the caller's `wolfram-validate` or workspace range after UTC normalization, including `null` for an open-ended request. A mismatch raises `wolfram_request_mismatch`. For `AdjustedClose`, both observed endpoints may differ from the requested endpoints by at most seven calendar days under the documented **market-calendar endpoint tolerance** for ordinary weekends and adjacent holidays. A larger clipped interval raises the dedicated `wolfram_history_incomplete` gate. This endpoint rule does not forward-fill prices. `recent_price` is separate and uses a seven-calendar-day freshness policy against the requested end or retrieval time; stale evidence raises `wolfram_recent_price_stale`.
+
+Observations must be finite positive dated structured values, and source annotations need a non-empty provider name. The returned property must equal `requested_property`. `Price`, `LatestTrade`, and `Close` may satisfy only `recent_price`; only `AdjustedClose` satisfies `adjusted_total_return`. Therefore every total-return backtest, MPT computation, and other return calculation using Wolfram requires `AdjustedClose`; recent-price properties and `RawClose` are never substitutes.
 
 If the plugin is unavailable, identity is not exact, property/coverage/source evidence is missing, or structured output is unusable, preserve the error (`wolfram_plugin_unavailable`, `wolfram_entity_mismatch`, `wolfram_property_unavailable`, `wolfram_source_unavailable`, or `wolfram_schema_error`) and stop that affected asset. Do not convert rendered tables or images into numeric evidence.
 
@@ -165,10 +189,43 @@ U.S. Treasury evidence also comes only from the official Wolfram plugin. The LLM
     "time_series_operator": null,
     "coupon_rate": null
   },
-  "request": {"start": "2021-01-01", "end": "2026-08-15"},
+  "request": {
+    "start": "2021-01-01",
+    "end": "2026-08-15",
+    "requested_qualifiers": {
+      "security_type": "Bill",
+      "maturity_duration": "3Month",
+      "market": null,
+      "due_date": "ConstantMaturity",
+      "frequency": "Daily",
+      "time_series_operator": null,
+      "coupon_rate": null
+    },
+    "requested_maturity": {
+      "duration": "3Month",
+      "years": 0.25,
+      "unit": "years",
+      "evidence_kind": "classifier_typed_request"
+    }
+  },
   "result": {
     "property": "Treasury",
     "maturity_years": 0.25,
+    "observed_qualifiers": {
+      "security_type": "Bill",
+      "maturity_duration": "3Month",
+      "market": null,
+      "due_date": "ConstantMaturity",
+      "frequency": "Daily",
+      "time_series_operator": null,
+      "coupon_rate": null
+    },
+    "observed_maturity": {
+      "duration": "3Month",
+      "years": 0.25,
+      "unit": "years",
+      "evidence_kind": "provider_observed_typed"
+    },
     "unit": "Percent",
     "observations": [
       {"timestamp": "2026-08-13T00:00:00+00:00", "value": 4.55},
@@ -181,13 +238,19 @@ U.S. Treasury evidence also comes only from the official Wolfram plugin. The LLM
 }
 ```
 
-`security_type` and non-empty semantic `maturity_duration` are required. Known `security_type` values are `Bill`, `Note`, `Bond`, and `TIPS`. `market` is optional and, when present, is `AuctionAverage` or `SecondaryMarket`; `due_date` is optional and, when present, is `ConstantMaturity`; `frequency` is optional and, when present, is one of `Daily`, `Weekly`, `BiWeekly`, `Monthly`, `Quarterly`, or `Annual`; `time_series_operator` is optional and, when present, is `Change`, `ChangeRate`, `AnnualChange`, `AnnualizedChangeRate`, or `YearOverYearChangeRate`; `coupon_rate` is optional and finite when present. Declared, request, and result qualifiers must agree exactly. `evidence_kind` is `us_treasury_current` (at least one observation) or `us_treasury_history` (at least two observations); country is exactly `UnitedStates`, property is `Treasury`, and unit is `Percent`.
+`security_type` and non-empty semantic `maturity_duration` are required. Known `security_type` values are `Bill`, `Note`, `Bond`, and `TIPS`. `market` is optional and, when present, is `AuctionAverage` or `SecondaryMarket`; `due_date` is optional and, when present, is `ConstantMaturity`; `frequency` is optional and, when present, is one of `Daily`, `Weekly`, `BiWeekly`, `Monthly`, `Quarterly`, or `Annual`; `time_series_operator` is optional and, when present, is `Change`, `ChangeRate`, `AnnualChange`, `AnnualizedChangeRate`, or `YearOverYearChangeRate`; `coupon_rate` is optional and finite when present.
 
-Preserve Wolfram `Missing` in `result.missing`. An empty result with the requested maturity marked unavailable is `treasury_maturity_unavailable`; another empty series is `treasury_series_unavailable`. Never replace either result with a nearby maturity. A curve returns direct `observation` values separately from explicit `calculation` values: only an opt-in, bounded linear maturity interpolation may be labelled `linear_maturity_interpolation`, never represented as observed evidence.
+For every successful observation envelope, all seven qualifier keys must appear in top-level `qualifiers`, `request.requested_qualifiers`, and provider-returned `result.observed_qualifiers`; the three structures must agree exactly, including explicit `null` values. `request.requested_maturity` and provider-derived `result.observed_maturity` both carry typed numeric years. Their duration and numeric years must agree with one another and with `result.maturity_years`. The validator never parses `10Year` text into a number, so a request carrying typed `10.0` years cannot be satisfied by provider-observed `2.0` years even if a model labels it `10Year`; the conflict raises `treasury_maturity_mismatch`.
+
+`evidence_kind` is `us_treasury_current` (at least one observation) or `us_treasury_history` (at least two observations); country is exactly `UnitedStates`, property is `Treasury`, and unit is `Percent`.
+
+Preserve Wolfram `Missing` in `result.missing`. An empty result with the requested maturity marked unavailable is `treasury_maturity_unavailable`; another empty series is `treasury_series_unavailable`. A provider that returns `Missing[NotAvailable]` may be unable to emit `observed_qualifiers`, `observed_maturity`, or `maturity_years`; the validator checks the complete requested echo and then preserves the exact unavailable error rather than converting it to a schema success or substituting evidence. Never replace either result with a nearby maturity. A curve returns direct `observation` values separately from explicit `calculation` values: only an opt-in, bounded linear maturity interpolation may be labelled `linear_maturity_interpolation`, never represented as observed evidence.
 
 ### 혼합 공급자 워크스페이스
 
-`prepare-portfolio`는 심볼별 Yahoo 성공 가격과 통화, Yahoo FX, 영수증, 실패를 스키마 버전 1 JSON에 원자적으로 저장한다. 따라서 한 종목의 실패가 다른 종목의 성공 증거를 지우지 않는다. 출력의 `fallback_required_symbols`만 LLM 의미 분류와 Alpaca-then-Wolfram 대안 검토 대상으로 삼는다.
+`prepare-portfolio`는 심볼별 Yahoo 성공 가격과 통화, Yahoo FX, 영수증, 실패를 스키마 버전 1 JSON에 원자적으로 저장한다. 따라서 한 종목의 실패가 다른 종목의 성공 증거를 지우지 않는다. 오직 `price_history_unavailable`인 가격 전용 실패만 `fallback_required_symbols`가 된다. `currency_unavailable`, 네트워크·스키마·기타 비가격 오류는 폴백 요구로 변환하지 않는다.
+
+가격만 실패한 심볼은 Yahoo 통화 메타데이터를 가격과 독립적으로 다시 조회해 `yahoo_currency_evidence`에 저장하고, 그 Yahoo 통화 및 기준 통화에 필요한 FX를 함께 조회한다. 완료 단계는 폴백의 정규화 통화가 저장된 Yahoo 정규화 통화와 같은지 확인하지만 계산 통화 단위에는 Yahoo 원 표기(소단위 포함)를 권위로 사용한다. 폴백이 통화나 FX를 대체하지 않으며, 자산 또는 기준 통화 FX가 없으면 `fx_history_unavailable`로 전체 계산을 막는다.
 
 `complete-portfolio`는 실패한 각 심볼에 정확히 하나의 검증된 Alpaca 또는 Wolfram 봉투를 요구한다. 요청하지 않은 봉투, 중복 봉투, 하나의 자산에 대한 두 공급자, 미해결 필수 종목, 빠진 Yahoo FX는 모두 전체 비중 계산을 막는다. 성공하면 각 자산의 유일한 최종 공급자를 `download_receipt.providers`에 기록하고 기존 수익률·최적화 게이트를 그대로 실행한다.
 
@@ -208,6 +271,29 @@ Preserve Wolfram `Missing` in `result.missing`. An empty result with the request
 ### 무위험수익률 계약
 
 백테스트의 기본 위험무위험 대용치는 historical window를 덮는 United States 3-month Treasury bill, `ConstantMaturity`, `Daily` Wolfram 역사 시계열이다. 연간 Percent 수익률은 `effective_annual_to_periodic`이라는 공개 분석 규칙으로 `periodic = (1 + annual_percent / 100)^(1 / periods_per_year) - 1`로 변환한다. 이 변환은 공급자 사실이 아니라 명시된 분석 관례다. 과거 관측치는 미래를 보지 않고 최대 3 calendar days만 전진 정렬할 수 있다. 정확한 시리즈·source annotation·시의성 있는 관측치가 없으면 샤프, 소르티노, 알파 같은 의존 필드는 `null`과 `risk_free_rate_unavailable`을 유지한다.
+
+정렬 영수증은 각 반환 날짜를 `aligned_observations` 항목으로 기록한다. 각 항목에는 `return_date`, 실제 `source_date`, `source_age_days`, `raw_annual_percent`, 변환 후 `periodic_rate`가 함께 있어야 한다. 최상위 영수증에는 `unit`, `retrieved_at`, `requested_range`, `observed_range`, `evidence_kind`, `missing`, 그리고 공급자·국가 entity·property·수치 maturity·qualifier·원 source annotation을 묶은 `upstream_provenance`를 보존한다.
+
+```json
+{
+  "aligned_observations": [
+    {
+      "return_date": "2026-01-09T00:00:00+00:00",
+      "source_date": "2026-01-09T00:00:00+00:00",
+      "source_age_days": 0,
+      "raw_annual_percent": 5.2,
+      "periodic_rate": 0.000975
+    }
+  ],
+  "unit": "Percent",
+  "retrieved_at": "2026-08-16T00:00:00+00:00",
+  "requested_range": {"start": "2025-01-01T00:00:00+00:00", "end": "2026-08-13T00:00:00+00:00"},
+  "observed_range": {"start": "2026-01-02T00:00:00+00:00", "end": "2026-01-09T00:00:00+00:00"},
+  "evidence_kind": "us_treasury_history",
+  "missing": [],
+  "upstream_provenance": {"provider": "wolfram", "property": "Treasury"}
+}
+```
 
 ## 백테스트 출력 계약
 
@@ -235,6 +321,6 @@ CLI 성공은 표준출력 JSON과 종료코드 0이다. 데이터 게이트 실
 
 의존성 오류 코드는 `requirements_missing`, `dependency_install_failed`, `dependency_import_failed`다. 주요 Yahoo·계산 오류 코드는 `candidate_not_returned`, `price_history_unavailable`, `fundamentals_unavailable`, `news_unavailable`, `currency_unavailable`, `fx_history_unavailable`, `insufficient_assets`, `insufficient_history`, `unsupported_currency`, `non_finite_returns`, `degenerate_covariance`, `infeasible_constraints`, `optimization_failed`, `network_error`다.
 
-폴백·증거 오류 코드는 `fallback_not_supported`, `fallback_class_ambiguous`, `alpaca_plugin_unavailable`, `alpaca_asset_not_found`, `alpaca_history_unavailable`, `alpaca_history_incomplete`, `alpaca_schema_error`, `corporate_actions_unavailable`, `corporate_action_adjustment_failed`, `wolfram_plugin_unavailable`, `wolfram_entity_mismatch`, `wolfram_property_unavailable`, `wolfram_source_unavailable`, `wolfram_schema_error`, `wolfram_qualifier_mismatch`, `wolfram_unit_mismatch`, `treasury_series_unavailable`, `treasury_maturity_unavailable`, `treasury_alignment_failed`, `risk_free_rate_unavailable`, `evidence_workspace_invalid`, `web_evidence_unavailable`, `web_primary_source_unverified`다. `wolfram_plugin_unavailable`과 `risk_free_rate_unavailable`은 ChatGPT 오케스트레이션/출력 계약의 상태 코드이며, 나머지 Wolfram/Treasury 게이트는 CLI 검증 결과일 수 있다. 웹 관련 두 코드는 모델 오케스트레이션 계약이며 CLI가 검색을 직접 실행한다는 뜻이 아니다.
+폴백·증거 오류 코드는 `fallback_not_supported`, `fallback_class_ambiguous`, `fallback_currency_mismatch`, `alpaca_plugin_unavailable`, `alpaca_asset_not_found`, `alpaca_history_unavailable`, `alpaca_history_incomplete`, `alpaca_schema_error`, `corporate_actions_unavailable`, `corporate_action_adjustment_failed`, `wolfram_plugin_unavailable`, `wolfram_entity_mismatch`, `wolfram_property_unavailable`, `wolfram_source_unavailable`, `wolfram_schema_error`, `wolfram_request_mismatch`, `wolfram_history_incomplete`, `wolfram_recent_price_stale`, `wolfram_qualifier_mismatch`, `wolfram_unit_mismatch`, `treasury_series_unavailable`, `treasury_maturity_unavailable`, `treasury_maturity_mismatch`, `treasury_alignment_failed`, `risk_free_rate_unavailable`, `evidence_workspace_invalid`, `web_evidence_unavailable`, `web_primary_source_unverified`다. `wolfram_plugin_unavailable`과 `risk_free_rate_unavailable`은 ChatGPT 오케스트레이션/출력 계약의 상태 코드이며, 나머지 Wolfram/Treasury 게이트는 CLI 검증 결과일 수 있다. 웹 관련 두 코드는 모델 오케스트레이션 계약이며 CLI가 검색을 직접 실행한다는 뜻이 아니다.
 
 오류가 난 분석 부분만 중단한다. 단, 티커 검증 실패는 그 티커에 의존하는 가격·재무·뉴스·포트폴리오 분석 전체를 막는다.

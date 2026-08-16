@@ -30,6 +30,18 @@
 - Do not publish, push, tag, or create a release without separate authorization.
 - Baseline receipt on 2026-08-16: `python3 -m unittest discover -s tests -v` ran 56 tests with zero failures.
 
+## Final-review hardening amendment (2026-08-16)
+
+The final review tightened several gates after the initial task snippets below were written. The shipped implementation and current fixtures supersede any older illustrative snippet in this plan:
+
+- Only `price_history_unavailable` is fallback-eligible. Prepare independently persists Yahoo currency evidence and required asset/base Yahoo FX for a failed-price symbol. Fallback normalized currency must equal Yahoo, and Yahoo's original currency unit remains calculation authority.
+- Wolfram classification evidence contains complete structured `yahoo_candidate` and `wolfram_observed` identities. Symbol/provider entity, exchange, issuer/company, security type, share class/instrument subtype, and currency are compared deterministically. Bare `identity_decision=match` is invalid.
+- Financial `unit` is a structured monetary object with `name`, `canonical_currency`, and `quantity_kind`. The deterministic observed-unit mapping includes `USDollars → USD` and `Euros → EUR`.
+- Envelope request ranges must match CLI/workspace ranges. `AdjustedClose` uses a seven-calendar-day market-calendar endpoint tolerance and otherwise raises `wolfram_history_incomplete`; recent price uses a separate seven-day freshness policy.
+- Successful Treasury evidence requires complete exact `requested_qualifiers` and provider `observed_qualifiers`, plus typed numeric `requested_maturity` and provider-derived `observed_maturity` that agree with `maturity_years`. Exact `Missing[NotAvailable]` remains authoritative even when the provider cannot emit observed echoes.
+- Risk-free aligned rows include raw annual percent and periodic rate; receipts also preserve unit, retrieval time, requested/observed range, evidence kind, missing markers, and upstream provenance.
+- The later 2026-08-16 release-verification pass returned `Missing[NotAvailable]` for all exact-maturity curve, 10-year nominal, TIPS, AuctionAverage, and SecondaryMarket Treasury canaries. Earlier successes are historical query-shape receipts, not current operational evidence.
+
 ---
 
 ## File Structure
@@ -104,27 +116,45 @@ def financial_envelope(
         "requested_property": property_name,
         "required_price_basis": required_price_basis,
         "classification_evidence": {
-            "yahoo_symbol": symbol,
-            "expected_provider_currency": currency,
-            "identity_decision": "match",
-            "matched_fields": ["symbol", "security_type", "currency"],
-            "conflicts": [],
+            "yahoo_candidate": {
+                "symbol": symbol,
+                "exchange": "NASDAQ",
+                "issuer": "Apple Inc.",
+                "security_type": "Equity",
+                "share_class": "CommonStock",
+                "currency": currency,
+            },
+            "wolfram_observed": {
+                "provider_entity": provider_entity,
+                "symbol": symbol,
+                "exchange": "NASDAQ",
+                "issuer": "Apple Inc.",
+                "security_type": "Equity",
+                "share_class": "CommonStock",
+                "currency": currency,
+            },
         },
         "primary_failure": {
             "provider": "yahoo",
             "code": "price_history_unavailable",
             "message": "Yahoo returned no usable price history.",
         },
-        "request": {"start": "2026-01-01", "end": "2026-02-01"},
+        "request": {"start": "2026-01-01", "end": "2026-01-13"},
         "result": {
             "entity_type": "Financial",
             "entity": provider_entity,
             "symbol": symbol,
             "exchange": "NASDAQ",
+            "issuer": "Apple Inc.",
             "security_type": "Equity",
+            "share_class": "CommonStock",
             "currency": currency,
             "property": property_name,
-            "unit": "USDollars",
+            "unit": {
+                "name": "USDollars",
+                "canonical_currency": currency,
+                "quantity_kind": "monetary",
+            },
             "observations": observations,
         },
         "sources": [
@@ -144,7 +174,7 @@ class WolframEnvelopeTests(unittest.TestCase):
                 ]
             ),
             start="2026-01-01",
-            end="2026-02-01",
+            end="2026-01-13",
         )
 
         self.assertEqual(result.series.name, "AAPL")
@@ -162,7 +192,7 @@ class WolframEnvelopeTests(unittest.TestCase):
                 observations=[observation("2026-01-12T20:00:00+00:00", 101.0)],
             ),
             start="2026-01-01",
-            end="2026-02-01",
+            end="2026-01-13",
         )
 
         self.assertEqual(result.receipt["price_basis"], "latest_trade")
@@ -231,14 +261,14 @@ def _required_text(source: Mapping[str, Any], key: str) -> str:
 Implement `normalize_wolfram_envelope` with these exact gates:
 
 1. Require `schema_version == 1`, `provider == "wolfram"`, and `evidence_kind == "financial_history"`.
-2. Require `classification_evidence.identity_decision == "match"`, an empty `conflicts` list, `classification_evidence.yahoo_symbol == symbol`, and `classification_evidence.expected_provider_currency == result.currency`.
-3. Require `result.entity_type == "Financial"`, `result.entity == provider_entity`, and `result.symbol == symbol`.
-4. Require non-empty `result.exchange`, `result.security_type`, `result.currency`, `result.unit`, `retrieved_at`, and at least one source with a non-empty `name`.
+2. Require complete structured `classification_evidence.yahoo_candidate` and `classification_evidence.wolfram_observed` objects; compare symbol/provider entity, exchange, issuer/company, security type, share class/instrument subtype, and currency deterministically against `result`. A bare model decision is never sufficient.
+3. Require `result.entity_type == "Financial"`, exact provider entity/symbol identity, and no missing required identity fields.
+4. Require a structured monetary `result.unit` with a deterministically mapped `name`, `canonical_currency` equal to `result.currency`, and `quantity_kind == "monetary"`; also require `retrieved_at` and at least one source with a non-empty `name`.
 5. Require `result.property == requested_property`.
 6. For `required_price_basis == "adjusted_total_return"`, require `AdjustedClose` and at least two observations.
 7. For `required_price_basis == "recent_price"`, allow `Price`, `LatestTrade`, or `Close` and at least one observation.
 8. Parse timestamps to UTC and values to finite positive floats. Collapse identical duplicates and reject conflicting duplicates.
-9. Sort the series, preserve the requested and observed ranges, and mark `coverage_status` as `complete`, `clipped_start`, `clipped_end`, or `clipped_both` without forward-filling.
+9. Require the envelope request range to match the caller range. Sort the series without forward-filling; allow at most seven calendar days of endpoint tolerance for ordinary market weekends/holidays, otherwise raise `wolfram_history_incomplete`. Apply a separate seven-day freshness gate to recent-price evidence.
 10. Return a receipt containing provider, symbol, provider entity, property, price basis, currency, unit, source list, observation count, requested range, observed range, coverage status, retrieval time, classification evidence, and primary failure.
 
 Use this price-basis mapping:
@@ -274,7 +304,7 @@ def test_total_return_rejects_unadjusted_close(self) -> None:
                 ],
             ),
             "2026-01-01",
-            "2026-02-01",
+            "2026-01-13",
         )
 
 def test_provider_entity_conflict_fails_closed(self) -> None:
@@ -286,7 +316,7 @@ def test_provider_entity_conflict_fails_closed(self) -> None:
     )
     envelope["result"]["entity"] = "NASDAQ:MSFT"
     with self.assertRaisesRegex(DataGateError, "wolfram_entity_mismatch"):
-        normalize_wolfram_envelope(envelope, "2026-01-01", None)
+        normalize_wolfram_envelope(envelope, "2026-01-01", "2026-01-13")
 
 def test_declared_identity_conflict_fails_closed(self) -> None:
     envelope = financial_envelope(
@@ -295,9 +325,9 @@ def test_declared_identity_conflict_fails_closed(self) -> None:
             observation("2026-01-12T00:00:00+00:00", 101.0),
         ]
     )
-    envelope["classification_evidence"]["conflicts"] = ["currency"]
+    envelope["classification_evidence"]["yahoo_candidate"]["currency"] = "EUR"
     with self.assertRaisesRegex(DataGateError, "wolfram_entity_mismatch"):
-        normalize_wolfram_envelope(envelope, "2026-01-01", None)
+        normalize_wolfram_envelope(envelope, "2026-01-01", "2026-01-13")
 
 def test_provider_currency_conflict_fails_closed(self) -> None:
     envelope = financial_envelope(
@@ -308,7 +338,7 @@ def test_provider_currency_conflict_fails_closed(self) -> None:
     )
     envelope["result"]["currency"] = "EUR"
     with self.assertRaisesRegex(DataGateError, "wolfram_entity_mismatch"):
-        normalize_wolfram_envelope(envelope, "2026-01-01", None)
+        normalize_wolfram_envelope(envelope, "2026-01-01", "2026-01-13")
 
 def test_missing_source_metadata_is_rejected(self) -> None:
     envelope = financial_envelope(
@@ -319,7 +349,7 @@ def test_missing_source_metadata_is_rejected(self) -> None:
     )
     envelope["sources"] = []
     with self.assertRaisesRegex(DataGateError, "wolfram_source_unavailable"):
-        normalize_wolfram_envelope(envelope, "2026-01-01", None)
+        normalize_wolfram_envelope(envelope, "2026-01-01", "2026-01-13")
 
 def test_conflicting_duplicate_observation_is_rejected(self) -> None:
     with self.assertRaisesRegex(DataGateError, "wolfram_schema_error"):

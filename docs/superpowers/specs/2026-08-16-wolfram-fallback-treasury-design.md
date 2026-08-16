@@ -111,9 +111,14 @@ The model emits a strict object such as:
     }
   ],
   "classification_evidence": {
-    "quote_type": "EQUITY",
-    "exchange": "NMS",
-    "currency": "USD"
+    "yahoo_candidate": {
+      "symbol": "AAPL",
+      "exchange": "NASDAQ",
+      "issuer": "Apple Inc.",
+      "security_type": "Equity",
+      "share_class": "CommonStock",
+      "currency": "USD"
+    }
   }
 }
 ```
@@ -136,6 +141,7 @@ The model emits a strict object such as:
   "country": "UnitedStates",
   "security_type": "TIPS",
   "maturity_duration": "10Year",
+  "maturity_years": 10.0,
   "market": null,
   "due_date": "ConstantMaturity",
   "frequency": "Daily",
@@ -206,7 +212,7 @@ A Wolfram financial history is eligible only if the response identifies a `Finan
 - instrument type;
 - quote currency.
 
-One missing identity field does not automatically reject a result if the remaining fields uniquely identify the selected Yahoo candidate. Any conflict in symbol, exchange, issuer, share class, security type, or currency rejects the envelope with `wolfram_entity_mismatch`.
+The classification evidence carries two independent structured objects: the selected `yahoo_candidate` identity and provider-returned `wolfram_observed` identity. Required symbol, exchange, issuer/company, security type, currency, provider entity, and at least one share-class/instrument-subtype field must be present. The deterministic validator compares every required and available field against the returned result. A bare model-authored `identity_decision=match` is not evidence. Any omission or conflict in symbol/provider entity, exchange, issuer, share class/instrument subtype, security type, or currency rejects the envelope with `wolfram_entity_mismatch`.
 
 ADR, ordinary share, preferred share, ETF, fund, index, currency pair, commodity, and cryptocurrency identities remain distinct. The validator never merges them merely because names are similar.
 
@@ -229,7 +235,8 @@ The validator rejects:
 - a currency conflict;
 - an empty series;
 - fewer than two observations for a historical request;
-- a materially clipped range not disclosed by the tool result;
+- a request range that differs from the CLI/workspace range;
+- an `AdjustedClose` endpoint clipped by more than the seven-calendar-day market-calendar endpoint tolerance (ordinary weekend/holiday differences inside the tolerance remain valid);
 - a total-return calculation backed by anything other than `AdjustedClose`.
 
 Asset prices are not forward-filled. Sampling and common-date alignment remain the responsibility of the existing return-matrix code.
@@ -259,7 +266,25 @@ The selected series and rejected alternatives are recorded. For ordinary fallbac
   "provider_entity": "NASDAQ:AAPL",
   "requested_property": "AdjustedClose",
   "required_price_basis": "adjusted_total_return",
-  "classification_evidence": {},
+  "classification_evidence": {
+    "yahoo_candidate": {
+      "symbol": "AAPL",
+      "exchange": "NASDAQ",
+      "issuer": "Apple Inc.",
+      "security_type": "Equity",
+      "share_class": "CommonStock",
+      "currency": "USD"
+    },
+    "wolfram_observed": {
+      "provider_entity": "NASDAQ:AAPL",
+      "symbol": "AAPL",
+      "exchange": "NASDAQ",
+      "issuer": "Apple Inc.",
+      "security_type": "Equity",
+      "share_class": "CommonStock",
+      "currency": "USD"
+    }
+  },
   "primary_failure": {
     "provider": "yahoo",
     "code": "price_history_unavailable",
@@ -274,9 +299,16 @@ The selected series and rejected alternatives are recorded. For ordinary fallbac
     "entity": "NASDAQ:AAPL",
     "symbol": "AAPL",
     "exchange": "NASDAQ",
+    "issuer": "Apple Inc.",
+    "security_type": "Equity",
+    "share_class": "CommonStock",
     "currency": "USD",
     "property": "AdjustedClose",
-    "unit": "USDollars",
+    "unit": {
+      "name": "USDollars",
+      "canonical_currency": "USD",
+      "quantity_kind": "monetary"
+    },
     "observations": []
   },
   "sources": [],
@@ -285,6 +317,8 @@ The selected series and rejected alternatives are recorded. For ordinary fallbac
 ```
 
 The exact tool response wrapper may also be retained when available, but the normalized association is mandatory. The validator does not depend on rendered prose or an image.
+
+The monetary unit relationship is structured and deterministic. The initial verified mapping includes `USDollars → USD` and `Euros → EUR`; future unit names require an explicit mapping addition rather than a country allowlist or free-form model assertion. `AdjustedClose` uses a seven-calendar-day market-calendar endpoint tolerance. Recent-price properties do not use the historical coverage gate and instead use their separate seven-day freshness policy.
 
 ## Treasury Capability Contract
 
@@ -371,12 +405,44 @@ When Wolfram directly returns one of its declared time-series operators, preserv
   },
   "request": {
     "start": "2020-01-01",
-    "end": "2026-08-13"
+    "end": "2026-08-13",
+    "requested_qualifiers": {
+      "security_type": "TIPS",
+      "maturity_duration": "10Year",
+      "market": null,
+      "due_date": "ConstantMaturity",
+      "frequency": "Daily",
+      "time_series_operator": null,
+      "coupon_rate": null
+    },
+    "requested_maturity": {
+      "duration": "10Year",
+      "years": 10.0,
+      "unit": "years",
+      "evidence_kind": "classifier_typed_request"
+    }
   },
   "result": {
     "property": "Treasury",
+    "maturity_years": 10.0,
+    "observed_qualifiers": {
+      "security_type": "TIPS",
+      "maturity_duration": "10Year",
+      "market": null,
+      "due_date": "ConstantMaturity",
+      "frequency": "Daily",
+      "time_series_operator": null,
+      "coupon_rate": null
+    },
+    "observed_maturity": {
+      "duration": "10Year",
+      "years": 10.0,
+      "unit": "years",
+      "evidence_kind": "provider_observed_typed"
+    },
     "unit": "Percent",
-    "observations": []
+    "observations": [],
+    "missing": []
   },
   "sources": [
     {
@@ -390,6 +456,8 @@ When Wolfram directly returns one of its declared time-series operators, preserv
 ```
 
 The source list is evidence returned by Wolfram and may differ by series. The adapter does not hardcode FRED as the source for every Treasury result.
+
+Successful Treasury envelopes require complete and exactly equal declared, requested, and provider-observed qualifier structures. Requested and provider-observed typed numeric maturity evidence must agree with `maturity_years`; no code parses a label such as `10Year` to invent that number. An unavailable `Missing[NotAvailable]` response may omit provider-observed qualifiers and maturity because the provider observed no series; the exact Missing gate still wins and no nearby series is substituted.
 
 ## Risk-Free-Rate Contract
 
@@ -427,6 +495,8 @@ Receipts preserve:
 - missing observations;
 - source and retrieval time.
 
+Every aligned receipt item preserves the raw annual percentage and resulting periodic rate. The receipt also carries unit, retrieval time, requested/observed range, evidence kind, missing markers, and an upstream provenance object containing the original Treasury entity, property, maturity, qualifiers, and source annotations.
+
 If no verified risk-free-rate series is available, Sharpe, Sortino, and alpha remain `null` with `risk_free_rate_unavailable`. The workflow does not invent a constant rate.
 
 ## Mixed-Provider Workspace
@@ -435,7 +505,7 @@ Keep the existing schema-versioned prepare/complete architecture and extend it w
 
 ### Prepare
 
-`prepare-portfolio` continues to save successful Yahoo assets, currencies, FX legs, receipts, and per-symbol failures. It emits `fallback_required_symbols` without choosing providers.
+`prepare-portfolio` continues to save successful Yahoo assets, currencies, FX legs, receipts, and per-symbol failures. Only `price_history_unavailable` becomes `fallback_required_symbols`; currency, schema, network, and other non-price failures stop. For a price-only failure, prepare independently retrieves and stores Yahoo currency metadata for the failed symbol and every required Yahoo asset/base FX leg before emitting the workspace.
 
 ### Complete
 
@@ -456,7 +526,7 @@ Rules:
 - Each failed required asset receives exactly one accepted final fallback envelope.
 - Multiple attempted-provider envelopes for one symbol are allowed only in an explicit provider-verification workflow and must declare which one was selected.
 - Extra, duplicate, or unrelated envelopes are rejected.
-- A Wolfram asset history does not replace Yahoo currency metadata or required Yahoo FX legs unless a future separately approved design adds an equivalent currency/FX fallback.
+- A Wolfram asset history does not replace Yahoo currency metadata or required Yahoo FX legs unless a future separately approved design adds an equivalent currency/FX fallback. Its normalized currency must equal stored Yahoo currency, and calculations use the Yahoo original currency unit as authority.
 - Missing required FX continues to block cross-currency calculations.
 - The final download receipt records one provider per asset.
 - No required asset is silently dropped.

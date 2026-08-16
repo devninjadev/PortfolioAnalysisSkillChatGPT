@@ -56,3 +56,17 @@ Yahoo 검색이 현지어를 받지 못할 수 있다. 예를 들어 `삼성전�
 - **dated canary — 현재 미국 국채 수준:** 5년 및 10년 TIPS, 3개월 `AuctionAverage` bill, 3개월 `SecondaryMarket` bill 현재값이 반환됐다.
 - **dated canary — Treasury source annotation:** Treasury property의 source annotation은 FRED at the Federal Reserve Bank of St. Louis를 이름으로 표시했다.
 - **dated canary — unavailable maturity:** 2026-08-16 probe returned `Missing` for 2-month and 4-month constant-maturity maturities; later availability is unverified and must be rechecked. 요청 시 nearby maturity로 대체하지 않는다.
+
+## 2026-08-16 later release verification — Treasury unavailable
+
+이 절은 같은 날짜의 위 성공 canary보다 **명확히 나중에 수행한 release-verification pass**의 최신 상태다. 조회일은 2026-08-16이며, 앞선 성공 결과는 해당 시점과 해당 Wolfram property/qualifier query shape에서만 유효한 **historical evidence**다. earlier successful probes are historical only: 재현할 때는 원 요청의 entity, property, 전체 qualifier, 요청 범위, 실제 retrieval timestamp를 모두 새 영수증에 남겨야 하며 현재 가용성 근거로 승격하지 않는다.
+
+최신 pass에서는 다음 exact query-shape canary를 다시 요청했다.
+
+- same-date nominal **exact-maturity curve** points;
+- **10-year nominal history**;
+- exact-maturity **TIPS history**;
+- 3-month **AuctionAverage bill** evidence;
+- 3-month **SecondaryMarket bill** evidence.
+
+These canaries all returned `Missing[NotAvailable]`. 따라서 **Treasury lane was not operational at release-verification time**. 곡선, 10년 명목, TIPS, 경매평균, 유통시장 중 어느 lane도 release 시점 작동으로 주장할 수 없고, 다른 maturity·market·security type으로 대체해서도 안 된다. 이후 실제 요청은 새 plugin 호출과 완전한 requested/provider-observed qualifier 영수증을 요구한다.

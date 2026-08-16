@@ -88,6 +88,66 @@ class SkillContractTests(unittest.TestCase):
         self.assertNotIn("계속 unavailable이다", text)
         self.assertIn("nearby maturity로 대체하지 않는다", text)
 
+    def test_latest_release_verification_discloses_all_treasury_lanes_unavailable(self) -> None:
+        text = (ROOT / "references" / "market-coverage.md").read_text(encoding="utf-8")
+        latest_heading = "## 2026-08-16 later release verification — Treasury unavailable"
+        self.assertIn(latest_heading, text)
+        latest = text[text.index(latest_heading) :]
+        for lane in (
+            "exact-maturity curve",
+            "10-year nominal history",
+            "TIPS history",
+            "AuctionAverage bill",
+            "SecondaryMarket bill",
+        ):
+            self.assertIn(lane, latest)
+        self.assertIn("all returned `Missing[NotAvailable]`", latest)
+        self.assertIn("Treasury lane was not operational at release-verification time", latest)
+        self.assertIn("earlier successful probes are historical only", latest)
+
+    def test_envelope_contract_requires_structured_identity_units_and_provider_echoes(self) -> None:
+        text = (ROOT / "references" / "data-contract.md").read_text(encoding="utf-8")
+        for token in (
+            '"yahoo_candidate"',
+            '"wolfram_observed"',
+            '"share_class"',
+            '"canonical_currency"',
+            '"requested_qualifiers"',
+            '"observed_qualifiers"',
+            '"requested_maturity"',
+            '"observed_maturity"',
+            "wolfram_history_incomplete",
+            "market-calendar endpoint tolerance",
+            '"aligned_observations"',
+            '"raw_annual_percent"',
+            '"periodic_rate"',
+            '"upstream_provenance"',
+        ):
+            self.assertIn(token, text)
+
+    def test_implementation_plan_does_not_endorse_superseded_wolfram_gates(self) -> None:
+        text = (
+            ROOT
+            / "docs"
+            / "superpowers"
+            / "plans"
+            / "2026-08-16-wolfram-fallback-treasury-implementation.md"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn(
+            'Require `classification_evidence.identity_decision == "match"`', text
+        )
+        self.assertNotIn(
+            'mark `coverage_status` as `complete`, `clipped_start`, `clipped_end`, or `clipped_both`',
+            text,
+        )
+        for token in (
+            '"yahoo_candidate"',
+            '"wolfram_observed"',
+            '"canonical_currency"',
+            "wolfram_history_incomplete",
+        ):
+            self.assertIn(token, text)
+
     def test_skill_cross_reference_and_agent_metadata_use_dated_evidence_contract(self) -> None:
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
         metadata = (ROOT / "agents" / "openai.yaml").read_text(encoding="utf-8")

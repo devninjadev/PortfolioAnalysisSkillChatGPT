@@ -104,7 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     complete = subparsers.add_parser(
         "complete-portfolio",
-        help="Merge validated Alpaca evidence and build portfolio candidates",
+        help="Merge validated fallback evidence and build portfolio candidates",
     )
     complete.add_argument("--workspace", required=True)
     complete.add_argument("--alpaca-input", action="append", default=[])

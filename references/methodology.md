@@ -60,7 +60,7 @@ Yahoo 값이 비어 있거나 조회가 실패하면 웹 검색으로 후보 출
 
 기본 분석은 주간 수익률, 최소 104개의 공통 관측치, 사용자가 선택한 기준 통화를 사용한다. 서로 다른 통화의 자산을 섞으면 Yahoo가 제공하는 `통화USD=X` 환율 다리로 각 통화 1단위의 USD 가치를 구한 뒤 같은 기준 통화의 가격열을 만든다. 직접 환율이 없으면 `통화=X` 역수를 시도한다. 자산 가격은 임의로 전진 채움하지 않는다. 환율은 거래일 불일치 보정을 위해 최대 3일까지만 전진 채운다.
 
-여러 종목 중 일부 Yahoo 이력만 실패하면 성공분을 버리지 않는다. `prepare-portfolio` 워크스페이스에 종목별 Yahoo 가격·통화·FX·오류를 보존한 뒤, 실패 심볼은 의미상 자격이 있으면 Alpaca를 먼저, 그 외 또는 Alpaca 게이트 실패 뒤에는 exact Financial entity가 확인될 때만 Wolfram으로 채워 `complete-portfolio`를 실행한다. 자산마다 최종 가격 공급자는 정확히 하나이며, 결과에는 각 자산별 `yahoo`, `alpaca`, 또는 `wolfram`을 명시한다. 필수 종목이나 Yahoo FX가 하나라도 해결되지 않으면 종목을 조용히 빼지 않고 모든 비중 출력을 막는다.
+여러 종목 중 일부 Yahoo **가격 이력만** 실패하면 성공분을 버리지 않는다. `currency_unavailable`나 다른 비가격 실패는 대안 경로로 보내지 않는다. 가격 실패 심볼도 Yahoo currency metadata를 가격과 독립적으로 다시 확인하고 자산/기준 통화 FX를 미리 보존한다. `prepare-portfolio` 워크스페이스에 종목별 Yahoo 가격·통화·FX·오류를 보존한 뒤, 실패 심볼은 의미상 자격이 있으면 Alpaca를 먼저, 그 외 또는 Alpaca 게이트 실패 뒤에는 exact Financial entity가 확인될 때만 Wolfram으로 채워 `complete-portfolio`를 실행한다. 폴백 정규화 통화는 Yahoo 정규화 통화와 같아야 하며 계산은 Yahoo 원 통화 단위를 권위로 쓴다. 자산마다 최종 가격 공급자는 정확히 하나이며, 결과에는 각 자산별 `yahoo`, `alpaca`, 또는 `wolfram`을 명시한다. 필수 종목이나 Yahoo FX가 하나라도 해결되지 않으면 종목을 조용히 빼지 않고 모든 비중 출력을 막는다.
 
 제시 가능한 결과는 다음 두 개다.
 
@@ -80,6 +80,8 @@ Formula: `(1 + annual_percent / 100)^(1 / periods_per_year) - 1`.
 Alignment: 마지막으로 검증된 Treasury 관측치는 미래를 보지 않고 at most three calendar days만 다음 수익률 날짜로 이어질 수 있다.
 
 Failure: 정확한 시리즈, source annotation, 또는 정렬이 없으면 의존 Sharpe, Sortino, and alpha fields remain `null` with `risk_free_rate_unavailable`.
+
+각 정렬 행에는 공급자 원값 `raw_annual_percent`와 로컬 계산값 `periodic_rate`를 함께 남긴다. 영수증은 `unit`, `retrieved_at`, requested/observed range, `evidence_kind`, missing markers, 그리고 원 Treasury provider/entity/property/maturity/qualifier/source annotation을 담은 `upstream_provenance`를 보존한다. 이 두 값을 함께 남겨야 공급자 관측과 분석 변환을 사후에 분리 검증할 수 있다.
 
 이 변환은 Wolfram 또는 Treasury 공급자가 새 사실을 제공한다는 뜻이 아니라, 공개된 effective annual-to-periodic 분석 관례다. LLM은 required qualifiers와 `Missing`을 구조화 봉투에 보존하고 `treasury-validate`로 검증한다. 요청한 만기가 없으면 nearby maturity로 바꾸지 않으며, 직접 관측 `observation`과 선택적 `linear_maturity_interpolation` 계산을 별개로 표시한다.
 

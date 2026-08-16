@@ -54,10 +54,6 @@ def financial_envelope(
         "requested_property": property_name,
         "required_price_basis": required_price_basis,
         "classification_evidence": {
-            "identity_decision": "match",
-            "yahoo_symbol": symbol,
-            "expected_provider_currency": currency,
-            "conflicts": [],
             "yahoo_candidate": {
                 "symbol": symbol,
                 "exchange": exchange,
