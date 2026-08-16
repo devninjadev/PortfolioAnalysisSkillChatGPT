@@ -681,6 +681,26 @@ def _curve_receipt_series_metadata(
     )
 
 
+def _evidence_by_maturity(
+    validated: Sequence[tuple[float, TreasurySeries]],
+) -> dict[float, dict[str, Any]]:
+    return {
+        maturity: {
+            "evidence_tier": treasury.receipt["evidence_tier"],
+            "evidence_confidence": treasury.receipt["evidence_confidence"],
+            "maturity_binding": treasury.receipt["maturity_binding"],
+            "exact_qualifier_status": treasury.receipt["exact_qualifier_status"],
+        }
+        for maturity, treasury in validated
+    }
+
+
+def _weakest_evidence_confidence(
+    evidence: Sequence[Mapping[str, Any]],
+) -> str:
+    return "lower" if any(item.get("evidence_confidence") == "lower" for item in evidence) else "high"
+
+
 def build_yield_curve(
     series_by_maturity: Mapping[float, TreasurySeries],
     observation_date: str,
@@ -704,6 +724,10 @@ def build_yield_curve(
                     "unit": treasury.receipt["unit"],
                     "qualifiers": dict(treasury.receipt["qualifiers"]),
                     "source_names": list(treasury.receipt["source_names"]),
+                    "evidence_tier": treasury.receipt["evidence_tier"],
+                    "evidence_confidence": treasury.receipt["evidence_confidence"],
+                    "maturity_binding": treasury.receipt["maturity_binding"],
+                    "exact_qualifier_status": treasury.receipt["exact_qualifier_status"],
                 }
             )
 
@@ -760,11 +784,22 @@ def build_yield_curve(
                         "role": "calculation",
                         "method": "linear_maturity_interpolation",
                         "bounding_maturities": [left_years, right_years],
+                        "supporting_evidence_tiers": [
+                            left["evidence_tier"],
+                            right["evidence_tier"],
+                        ],
+                        "evidence_confidence": _weakest_evidence_confidence(
+                            [left, right]
+                        ),
                     }
                 )
                 continue
         missing.append({"maturity_years": target_years, "reason": "not_observed"})
 
+    evidence_by_maturity = _evidence_by_maturity(validated)
+    overall_confidence = _weakest_evidence_confidence(
+        list(evidence_by_maturity.values())
+    )
     return YieldCurveResult(
         observed=observed,
         missing=missing,
@@ -773,6 +808,13 @@ def build_yield_curve(
             "observation_date": target_date.isoformat(),
             "source_names": source_names,
             "qualifiers": qualifiers,
+            "evidence_by_maturity": evidence_by_maturity,
+            "evidence_confidence": overall_confidence,
+            "dependency_warning": (
+                "Curve calculations inherit a lower-confidence Treasury rate input."
+                if overall_confidence == "lower"
+                else None
+            ),
         },
     )
 
@@ -801,6 +843,10 @@ def build_historical_yield_curve(
         )
 
     source_names, qualifiers = _curve_receipt_series_metadata(validated)
+    evidence_by_maturity = _evidence_by_maturity(validated)
+    overall_confidence = _weakest_evidence_confidence(
+        list(evidence_by_maturity.values())
+    )
     return HistoricalYieldCurveResult(
         frame=frame,
         receipt={
@@ -811,6 +857,13 @@ def build_historical_yield_curve(
             "last_date": frame.index.max().isoformat(),
             "qualifiers": qualifiers,
             "source_names": source_names,
+            "evidence_by_maturity": evidence_by_maturity,
+            "evidence_confidence": overall_confidence,
+            "dependency_warning": (
+                "Historical curve calculations inherit a lower-confidence Treasury rate input."
+                if overall_confidence == "lower"
+                else None
+            ),
         },
     )
 
@@ -921,6 +974,7 @@ def align_periodic_risk_free(
             "source_age_days": int(source_age),
             "raw_annual_percent": float(raw_annual_percent),
             "periodic_rate": float(periodic_rate),
+            "rate_input_confidence": annual_percent.receipt["evidence_confidence"],
         }
         for return_date, source_date, source_age, raw_annual_percent, periodic_rate in zip(
             aligned_index,
@@ -938,6 +992,10 @@ def align_periodic_risk_free(
         "maturity_years": annual_percent.maturity_years,
         "qualifiers": qualifiers,
         "sources": list(annual_percent.receipt["sources"]),
+        "evidence_tier": annual_percent.receipt["evidence_tier"],
+        "evidence_confidence": annual_percent.receipt["evidence_confidence"],
+        "maturity_binding": annual_percent.receipt["maturity_binding"],
+        "exact_qualifier_status": annual_percent.receipt["exact_qualifier_status"],
     }
     return RiskFreeResult(
         series=periodic,
@@ -963,6 +1021,10 @@ def align_periodic_risk_free(
             "requested_range": dict(annual_percent.receipt["requested_range"]),
             "observed_range": dict(annual_percent.receipt["observed_range"]),
             "evidence_kind": annual_percent.receipt["evidence_kind"],
+            "evidence_tier": annual_percent.receipt["evidence_tier"],
+            "evidence_confidence": annual_percent.receipt["evidence_confidence"],
+            "maturity_binding": annual_percent.receipt["maturity_binding"],
+            "exact_qualifier_status": annual_percent.receipt["exact_qualifier_status"],
             "missing": list(annual_percent.receipt["missing"]),
             "upstream_provenance": upstream_provenance,
             "qualifiers": qualifiers,
@@ -970,6 +1032,11 @@ def align_periodic_risk_free(
             "note": (
                 "Effective annual-to-periodic conversion is a disclosed analysis convention "
                 "applied to the provider's annual percentage yield."
+            ),
+            "dependency_warning": (
+                "Dependent metrics inherit a lower-confidence Treasury rate input."
+                if annual_percent.receipt["evidence_confidence"] == "lower"
+                else None
             ),
         },
     )

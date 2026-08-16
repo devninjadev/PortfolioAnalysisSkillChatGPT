@@ -164,6 +164,18 @@ def inferred_treasury_envelope(
     return envelope
 
 
+def inferred_treasury_series_for_curve(maturity_years: float, value: float):
+    maturity_duration = "3Month" if maturity_years == 0.25 else f"{int(maturity_years)}Year"
+    return normalize_treasury_envelope(
+        inferred_treasury_envelope(
+            evidence_kind="us_treasury_current",
+            maturity_duration=maturity_duration,
+            maturity_years=maturity_years,
+            observations=[treasury_observation("2026-08-13", value)],
+        )
+    )
+
+
 class TreasuryEnvelopeTests(unittest.TestCase):
     def test_labeled_current_treasury_is_usable_at_lower_confidence(self) -> None:
         result = normalize_treasury_envelope(
@@ -605,6 +617,30 @@ class TreasuryEnvelopeTests(unittest.TestCase):
 
 
 class YieldCurveTests(unittest.TestCase):
+    def test_curve_and_interpolation_inherit_weakest_treasury_confidence(self) -> None:
+        result = build_yield_curve(
+            {
+                2.0: treasury_series_for_curve(2.0, 4.0),
+                10.0: inferred_treasury_series_for_curve(10.0, 5.0),
+            },
+            observation_date="2026-08-13",
+            requested_maturities=[2.0, 5.0, 10.0],
+            interpolate=True,
+        )
+
+        self.assertEqual(result.observed[0]["evidence_confidence"], "high")
+        self.assertEqual(result.observed[1]["evidence_confidence"], "lower")
+        self.assertEqual(result.calculated[0]["evidence_confidence"], "lower")
+        self.assertEqual(
+            result.calculated[0]["supporting_evidence_tiers"],
+            ["provider_confirmed", "provider_labeled_inferred"],
+        )
+        self.assertEqual(result.receipt["evidence_confidence"], "lower")
+        self.assertEqual(
+            result.receipt["evidence_by_maturity"][10.0]["evidence_tier"],
+            "provider_labeled_inferred",
+        )
+
     def test_curve_separates_observed_and_missing_points(self) -> None:
         result = build_yield_curve(
             {
@@ -699,8 +735,67 @@ class YieldCurveTests(unittest.TestCase):
         self.assertEqual(result.frame.index[0].isoformat(), "2026-08-13T00:00:00+00:00")
         self.assertEqual(result.receipt["alignment"], "exact_common_dates")
 
+    def test_historical_curve_preserves_lower_confidence_by_maturity(self) -> None:
+        lower = normalize_treasury_envelope(
+            inferred_treasury_envelope(
+                maturity_duration="2Year",
+                maturity_years=2.0,
+                observations=[
+                    treasury_observation("2026-08-12", 4.10),
+                    treasury_observation("2026-08-13", 4.15),
+                ],
+            )
+        )
+        high = normalize_treasury_envelope(
+            treasury_envelope(
+                observations=[
+                    treasury_observation("2026-08-12", 4.60),
+                    treasury_observation("2026-08-13", 4.63),
+                ]
+            )
+        )
+
+        result = build_historical_yield_curve({2.0: lower, 10.0: high})
+
+        self.assertEqual(result.receipt["evidence_confidence"], "lower")
+        self.assertEqual(
+            result.receipt["evidence_by_maturity"][2.0]["evidence_tier"],
+            "provider_labeled_inferred",
+        )
+
 
 class RiskFreeRateTests(unittest.TestCase):
+    def test_lower_confidence_rate_is_usable_and_disclosed_downstream(self) -> None:
+        treasury = normalize_treasury_envelope(
+            inferred_treasury_envelope(
+                maturity_duration="3Month",
+                maturity_years=0.25,
+                observations=[
+                    treasury_observation("2026-01-02", 5.0),
+                    treasury_observation("2026-01-09", 5.2),
+                ],
+            )
+        )
+
+        result = align_periodic_risk_free(
+            treasury,
+            pd.to_datetime(["2026-01-02T00:00:00+00:00", "2026-01-09T00:00:00+00:00"]),
+            periods_per_year=52,
+        )
+
+        self.assertEqual(result.receipt["evidence_tier"], "provider_labeled_inferred")
+        self.assertEqual(result.receipt["evidence_confidence"], "lower")
+        self.assertEqual(result.receipt["exact_qualifier_status"], "unavailable")
+        self.assertIn("lower-confidence", result.receipt["dependency_warning"])
+        self.assertEqual(
+            result.receipt["upstream_provenance"]["maturity_binding"],
+            "provider_labeled_or_semantically_inferred",
+        )
+        self.assertEqual(
+            result.receipt["aligned_observations"][0]["rate_input_confidence"],
+            "lower",
+        )
+
     def test_annual_percent_converts_to_weekly_periodic_rate(self) -> None:
         treasury = normalize_treasury_envelope(
             treasury_envelope(
