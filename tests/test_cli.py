@@ -20,6 +20,10 @@ from advisor_data_cli import build_parser, main  # noqa: E402
 from tests.test_alpaca import bar, crypto_envelope  # noqa: E402
 from tests.test_treasury import treasury_envelope, treasury_observation  # noqa: E402
 from tests.test_wolfram import financial_envelope, observation  # noqa: E402
+from tests.test_wolfram_fx import (  # noqa: E402
+    fx_observation,
+    wolfram_fx_envelope,
+)
 
 
 class FakeGateway:
@@ -45,6 +49,37 @@ class FakeGateway:
 
 
 class CliTests(unittest.TestCase):
+    def test_wolfram_fx_parser_keeps_validation_and_completion_inputs_separate(self) -> None:
+        parser = build_parser()
+        validate = parser.parse_args(
+            [
+                "wolfram-fx-validate",
+                "--input",
+                "eur.json",
+                "--start",
+                "2026-01-01",
+                "--end",
+                "2026-02-01",
+            ]
+        )
+        complete = parser.parse_args(
+            [
+                "complete-portfolio",
+                "--workspace",
+                "workspace.json",
+                "--wolfram-input",
+                "asset.json",
+                "--wolfram-fx-input",
+                "eur.json",
+                "--wolfram-fx-input",
+                "krw.json",
+            ]
+        )
+
+        self.assertEqual(validate.command, "wolfram-fx-validate")
+        self.assertEqual(complete.wolfram_input, ["asset.json"])
+        self.assertEqual(complete.wolfram_fx_input, ["eur.json", "krw.json"])
+
     def test_complete_portfolio_help_is_provider_neutral(self) -> None:
         parser = build_parser()
         subparsers = next(
@@ -225,6 +260,47 @@ class CliTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(code, 0)
         self.assertEqual(payload["validation"]["provider"], "wolfram")
+        self.assertEqual(payload["normalized"]["observation_count"], 2)
+
+    def test_wolfram_fx_validate_emits_pair_orientation_and_provenance(self) -> None:
+        envelope = wolfram_fx_envelope(
+            currency="EUR",
+            base_currency="EUR",
+            quote_currency="USD",
+            symbol="EUR/USD",
+            unit_numerator="USD",
+            unit_denominator="EUR",
+            observations=[
+                fx_observation("2026-01-05", 1.15),
+                fx_observation("2026-01-30", 1.16),
+            ],
+            start="2026-01-01",
+            end="2026-02-01",
+        )
+        envelope["primary_failure"]["details"]["currency"] = "EUR"
+        envelope["primary_failure"]["message"] = "Yahoo EUR FX failed."
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = self._write_json(tmp, "eur-wolfram-fx.json", envelope)
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        "wolfram-fx-validate",
+                        "--input",
+                        str(input_path),
+                        "--start",
+                        "2026-01-01",
+                        "--end",
+                        "2026-02-01",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["validation"]["requested_pair"], "EUR/USD")
+        self.assertFalse(payload["validation"]["inversion_applied"])
+        self.assertEqual(payload["validation"]["source_annotation_status"], "unavailable")
+        self.assertEqual(payload["normalized"]["currency"], "EUR")
         self.assertEqual(payload["normalized"]["observation_count"], 2)
 
     def test_treasury_validate_emits_qualifiers_and_range(self) -> None:
@@ -421,6 +497,102 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(complete_payload["return_receipt"]["observation_count"], 3)
         self.assertIn("minimum_variance", complete_payload["portfolio_candidates"])
+
+    def test_complete_portfolio_recovers_failed_yahoo_fx_with_wolfram_input(self) -> None:
+        dates = [
+            "2026-01-05T00:00:00+00:00",
+            "2026-01-12T00:00:00+00:00",
+            "2026-01-19T00:00:00+00:00",
+            "2026-01-26T00:00:00+00:00",
+        ]
+        fx_failure = {
+            "code": "fx_history_unavailable",
+            "message": "Yahoo EUR FX failed.",
+            "details": {"stage": "fx_history", "currency": "EUR"},
+        }
+        workspace = {
+            "schema_version": 1,
+            "symbols": ["AAPL", "SAP.DE"],
+            "start": "2026-01-01",
+            "end": "2026-02-01",
+            "base_currency": "USD",
+            "assets": {
+                "AAPL": {
+                    "currency": "USD",
+                    "prices": {
+                        "name": "AAPL",
+                        "observations": [
+                            {"timestamp": date, "value": value}
+                            for date, value in zip(dates, [100.0, 102.0, 101.0, 104.0], strict=True)
+                        ],
+                    },
+                    "receipt": {"source": "Yahoo fixture"},
+                },
+                "SAP.DE": {
+                    "currency": "EUR",
+                    "prices": {
+                        "name": "SAP.DE",
+                        "observations": [
+                            {"timestamp": date, "value": value}
+                            for date, value in zip(dates, [200.0, 203.0, 202.0, 206.0], strict=True)
+                        ],
+                    },
+                    "receipt": {"source": "Yahoo fixture"},
+                },
+            },
+            "failures": {},
+            "yahoo_currency_evidence": {
+                "AAPL": {"currency": "USD"},
+                "SAP.DE": {"currency": "EUR"},
+            },
+            "fx_prices": {},
+            "fx_receipts": {},
+            "fx_failures": {"EUR": fx_failure},
+            "fallback_required_fx": ["EUR"],
+            "retrieved_at": "2026-08-17T00:00:00+00:00",
+        }
+        fx_envelope = wolfram_fx_envelope(
+            currency="EUR",
+            base_currency="EUR",
+            quote_currency="USD",
+            symbol="EUR/USD",
+            unit_numerator="USD",
+            unit_denominator="EUR",
+            observations=[
+                fx_observation(date, value)
+                for date, value in zip(dates, [1.15, 1.16, 1.14, 1.17], strict=True)
+            ],
+            start="2026-01-01",
+            end="2026-02-01",
+        )
+        fx_envelope["primary_failure"] = {"provider": "yahoo", **fx_failure}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_path = self._write_json(tmp, "workspace.json", workspace)
+            fx_path = self._write_json(tmp, "eur-fx.json", fx_envelope)
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        "complete-portfolio",
+                        "--workspace",
+                        str(workspace_path),
+                        "--wolfram-fx-input",
+                        str(fx_path),
+                        "--frequency",
+                        "weekly",
+                        "--min-observations",
+                        "3",
+                        "--max-weight",
+                        "1.0",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["download_receipt"]["fx_providers"], {"EUR": "wolfram"})
+        self.assertEqual(payload["return_receipt"]["observation_count"], 3)
+        self.assertIn("minimum_variance", payload["portfolio_candidates"])
 
     def test_complete_portfolio_without_required_alpaca_input_emits_no_weights(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
