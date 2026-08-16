@@ -55,4 +55,4 @@ Yahoo 검색이 현지어를 받지 못할 수 있다. 예를 들어 `삼성전�
 - **dated canary — 명목 미국 국채 constant-maturity history:** 1개월, 3개월, 6개월, 1년, 2년, 3년, 5년, 7년, 10년, 20년, 30년의 daily constant-maturity history가 2025-01-02부터 2026-08-13까지 404개 관측치로 반환됐다.
 - **dated canary — 현재 미국 국채 수준:** 5년 및 10년 TIPS, 3개월 `AuctionAverage` bill, 3개월 `SecondaryMarket` bill 현재값이 반환됐다.
 - **dated canary — Treasury source annotation:** Treasury property의 source annotation은 FRED at the Federal Reserve Bank of St. Louis를 이름으로 표시했다.
-- **dated canary — unavailable maturity:** 2개월과 4개월 constant-maturity probe는 `Missing`을 반환했으며 계속 unavailable이다. 요청 시 nearby maturity로 대체하지 않는다.
+- **dated canary — unavailable maturity:** 2026-08-16 probe returned `Missing` for 2-month and 4-month constant-maturity maturities; later availability is unverified and must be rechecked. 요청 시 nearby maturity로 대체하지 않는다.
