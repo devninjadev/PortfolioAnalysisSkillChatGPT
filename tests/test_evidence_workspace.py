@@ -20,6 +20,7 @@ from advisor_data.evidence_workspace import (  # noqa: E402
 )
 from advisor_data.market_data import MarketBundle  # noqa: E402
 from tests.test_alpaca import bar, crypto_envelope, stock_envelope  # noqa: E402
+from tests.test_wolfram import financial_envelope, observation  # noqa: E402
 
 
 INDEX = pd.to_datetime(
@@ -135,6 +136,217 @@ class EvidenceWorkspaceTests(unittest.TestCase):
             bundle.receipt["asset_receipts"]["BTC-USD"]["primary_failure"]["code"],
             "price_history_unavailable",
         )
+
+    def test_complete_merges_yahoo_and_wolfram_without_dropping_symbols(self) -> None:
+        def loader(*, symbols: list[str], **_: object) -> MarketBundle:
+            if symbols == ["AAPL"]:
+                return yahoo_bundle("AAPL", [100.0, 101.0])
+            raise DataGateError(
+                "price_history_unavailable",
+                "Yahoo returned no usable history for SAP.DE.",
+            )
+
+        workspace = prepare_yahoo_workspace(
+            ["AAPL", "SAP.DE"],
+            "2026-01-01",
+            "2026-02-01",
+            "USD",
+            market_loader=loader,
+        )
+        envelope = financial_envelope(
+            symbol="SAP.DE",
+            provider_entity="XETR:SAP",
+            currency="EUR",
+            observations=[
+                observation("2026-01-05T00:00:00+00:00", 200.0),
+                observation("2026-01-12T00:00:00+00:00", 202.0),
+            ],
+        )
+        envelope["result"]["symbol"] = "SAP.DE"  # type: ignore[index]
+        envelope["result"]["exchange"] = "XETRA"  # type: ignore[index]
+        workspace["fx_prices"]["EUR"] = {
+            "name": "EURUSD=X",
+            "observations": [
+                {"timestamp": "2026-01-05T00:00:00+00:00", "value": 1.15},
+                {"timestamp": "2026-01-12T00:00:00+00:00", "value": 1.16},
+            ],
+        }
+
+        bundle = complete_market_bundle(workspace, [envelope])
+
+        self.assertEqual(list(bundle.prices.columns), ["AAPL", "SAP.DE"])
+        self.assertEqual(
+            bundle.receipt["providers"],
+            {"AAPL": "yahoo", "SAP.DE": "wolfram"},
+        )
+        self.assertEqual(bundle.currencies["SAP.DE"], "EUR")
+
+    def test_legacy_alpaca_envelope_without_provider_uses_alpaca(self) -> None:
+        workspace = prepare_yahoo_workspace(
+            ["BTC-USD"],
+            "2026-01-01",
+            "2026-02-01",
+            "USD",
+            market_loader=lambda **_: (_ for _ in ()).throw(
+                DataGateError("price_history_unavailable", "Yahoo failed.")
+            ),
+        )
+        envelope = crypto_envelope(
+            bars=[
+                bar("BTC/USD", "2026-01-05T00:00:00+00:00", 90000.0),
+                bar("BTC/USD", "2026-01-12T00:00:00+00:00", 91000.0),
+            ]
+        )
+
+        bundle = complete_market_bundle(workspace, [envelope])
+
+        self.assertNotIn("provider", envelope)
+        self.assertEqual(bundle.receipt["providers"], {"BTC-USD": "alpaca"})
+
+    def test_complete_preserves_one_receipt_for_each_distinct_provider(self) -> None:
+        def loader(*, symbols: list[str], **_: object) -> MarketBundle:
+            if symbols == ["AAPL"]:
+                return yahoo_bundle("AAPL", [100.0, 101.0])
+            raise DataGateError("price_history_unavailable", "Yahoo failed.")
+
+        workspace = prepare_yahoo_workspace(
+            ["AAPL", "BTC-USD", "SAP.DE"],
+            "2026-01-01",
+            "2026-02-01",
+            "USD",
+            market_loader=loader,
+        )
+        workspace["fx_prices"]["EUR"] = {
+            "name": "EURUSD=X",
+            "observations": [
+                {"timestamp": "2026-01-05T00:00:00+00:00", "value": 1.15},
+                {"timestamp": "2026-01-12T00:00:00+00:00", "value": 1.16},
+            ],
+        }
+        wolfram = financial_envelope(
+            symbol="SAP.DE",
+            provider_entity="XETR:SAP",
+            currency="EUR",
+            observations=[
+                observation("2026-01-05T00:00:00+00:00", 200.0),
+                observation("2026-01-12T00:00:00+00:00", 202.0),
+            ],
+        )
+        wolfram["result"]["exchange"] = "XETRA"  # type: ignore[index]
+
+        bundle = complete_market_bundle(
+            workspace,
+            [
+                crypto_envelope(
+                    bars=[
+                        bar("BTC/USD", "2026-01-05T00:00:00+00:00", 90000.0),
+                        bar("BTC/USD", "2026-01-12T00:00:00+00:00", 91000.0),
+                    ]
+                ),
+                wolfram,
+            ],
+        )
+
+        self.assertEqual(
+            bundle.receipt["providers"],
+            {"AAPL": "yahoo", "BTC-USD": "alpaca", "SAP.DE": "wolfram"},
+        )
+        self.assertEqual(
+            bundle.receipt["asset_receipts"]["BTC-USD"]["primary_failure"],
+            workspace["failures"]["BTC-USD"],
+        )
+        self.assertEqual(
+            bundle.receipt["asset_receipts"]["SAP.DE"]["primary_failure"],
+            workspace["failures"]["SAP.DE"],
+        )
+
+    def test_duplicate_alpaca_and_wolfram_envelopes_for_failed_symbol_are_rejected(self) -> None:
+        workspace = prepare_yahoo_workspace(
+            ["SAP.DE"],
+            "2026-01-01",
+            "2026-02-01",
+            "USD",
+            market_loader=lambda **_: (_ for _ in ()).throw(
+                DataGateError("price_history_unavailable", "Yahoo failed.")
+            ),
+        )
+        alpaca = crypto_envelope(
+            symbol="SAP.DE",
+            bars=[
+                bar("BTC/USD", "2026-01-05T00:00:00+00:00", 90000.0),
+                bar("BTC/USD", "2026-01-12T00:00:00+00:00", 91000.0),
+            ],
+        )
+        wolfram = financial_envelope(
+            symbol="SAP.DE",
+            provider_entity="XETR:SAP",
+            currency="EUR",
+            observations=[
+                observation("2026-01-05T00:00:00+00:00", 200.0),
+                observation("2026-01-12T00:00:00+00:00", 202.0),
+            ],
+        )
+        wolfram["result"]["exchange"] = "XETRA"  # type: ignore[index]
+
+        with self.assertRaisesRegex(DataGateError, "Duplicate fallback inputs"):
+            complete_market_bundle(workspace, [alpaca, wolfram])
+
+    def test_wolfram_envelope_for_yahoo_success_is_rejected_as_unrequested(self) -> None:
+        workspace = prepare_yahoo_workspace(
+            ["AAPL"],
+            "2026-01-01",
+            "2026-02-01",
+            "USD",
+            market_loader=lambda **_: yahoo_bundle("AAPL", [100.0, 101.0]),
+        )
+        envelope = financial_envelope(
+            observations=[
+                observation("2026-01-05T00:00:00+00:00", 100.0),
+                observation("2026-01-12T00:00:00+00:00", 101.0),
+            ]
+        )
+
+        with self.assertRaisesRegex(DataGateError, "unrequested symbol AAPL"):
+            complete_market_bundle(workspace, [envelope])
+
+    def test_unknown_provider_is_rejected_before_normalization(self) -> None:
+        workspace = prepare_yahoo_workspace(
+            ["SAP.DE"],
+            "2026-01-01",
+            "2026-02-01",
+            "USD",
+            market_loader=lambda **_: (_ for _ in ()).throw(
+                DataGateError("price_history_unavailable", "Yahoo failed.")
+            ),
+        )
+        envelope = {"provider": "unvalidated", "symbol": "SAP.DE"}
+
+        with self.assertRaisesRegex(DataGateError, "No validated fallback adapter"):
+            complete_market_bundle(workspace, [envelope])
+
+    def test_missing_eur_yahoo_fx_blocks_wolfram_bundle(self) -> None:
+        workspace = prepare_yahoo_workspace(
+            ["SAP.DE"],
+            "2026-01-01",
+            "2026-02-01",
+            "USD",
+            market_loader=lambda **_: (_ for _ in ()).throw(
+                DataGateError("price_history_unavailable", "Yahoo failed.")
+            ),
+        )
+        envelope = financial_envelope(
+            symbol="SAP.DE",
+            provider_entity="XETR:SAP",
+            currency="EUR",
+            observations=[
+                observation("2026-01-05T00:00:00+00:00", 200.0),
+                observation("2026-01-12T00:00:00+00:00", 202.0),
+            ],
+        )
+        envelope["result"]["exchange"] = "XETRA"  # type: ignore[index]
+
+        with self.assertRaisesRegex(DataGateError, "fx_history_unavailable"):
+            complete_market_bundle(workspace, [envelope])
 
     def test_unsupported_korean_failure_never_accepts_alpaca(self) -> None:
         def failed_loader(**_: object) -> MarketBundle:

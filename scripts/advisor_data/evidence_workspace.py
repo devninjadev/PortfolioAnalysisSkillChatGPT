@@ -19,6 +19,7 @@ from .market_data import (
     download_currency_bridge,
     download_market_bundle,
 )
+from .wolfram import normalize_wolfram_envelope
 
 
 WORKSPACE_SCHEMA_VERSION = 1
@@ -278,11 +279,24 @@ def _required_fx(currencies: Mapping[str, str], base_currency: str) -> set[str]:
     return required
 
 
+def _envelope_provider(envelope: Mapping[str, Any]) -> str:
+    declared = str(envelope.get("provider") or "").strip().lower()
+    if declared:
+        return declared
+    if "fallback_class" in envelope:
+        return "alpaca"
+    raise DataGateError(
+        "evidence_workspace_invalid",
+        "Fallback evidence does not declare a provider.",
+    )
+
+
 def complete_market_bundle(
     workspace: Mapping[str, Any],
     envelopes: Sequence[Mapping[str, Any]],
+    normalizers: Mapping[str, Callable[..., Any]] | None = None,
 ) -> MarketBundle:
-    """Merge Yahoo evidence with one validated Alpaca envelope per failed symbol."""
+    """Merge Yahoo evidence with one validated provider fallback per failed symbol."""
 
     if workspace.get("schema_version") != WORKSPACE_SCHEMA_VERSION:
         raise DataGateError("evidence_workspace_invalid", "Unsupported evidence workspace schema.")
@@ -292,22 +306,36 @@ def complete_market_bundle(
     if not isinstance(assets, Mapping) or not isinstance(failures, Mapping):
         raise DataGateError("evidence_workspace_invalid", "Workspace assets and failures must be objects.")
 
-    envelopes_by_symbol: dict[str, Mapping[str, Any]] = {}
+    active_normalizers = dict(
+        normalizers
+        or {
+            "alpaca": normalize_alpaca_envelope,
+            "wolfram": normalize_wolfram_envelope,
+        }
+    )
+    envelopes_by_symbol: dict[str, tuple[str, Mapping[str, Any]]] = {}
     for envelope in envelopes:
         if not isinstance(envelope, Mapping):
             raise DataGateError("alpaca_schema_error", "Alpaca input must be an object.")
         symbol = str(envelope.get("symbol") or "")
         if symbol not in failures:
             raise DataGateError(
-                "alpaca_schema_error",
-                f"Alpaca input for unrequested symbol {symbol or 'missing'} was supplied.",
+                "evidence_workspace_invalid",
+                f"Fallback input for unrequested symbol {symbol or 'missing'} was supplied.",
+            )
+        provider = _envelope_provider(envelope)
+        if provider not in active_normalizers:
+            raise DataGateError(
+                "fallback_not_supported",
+                f"No validated fallback adapter is available for {provider}.",
+                {"provider": provider, "symbol": symbol},
             )
         if symbol in envelopes_by_symbol:
             raise DataGateError(
-                "alpaca_schema_error",
-                f"Duplicate Alpaca inputs were supplied for {symbol}.",
+                "evidence_workspace_invalid",
+                f"Duplicate fallback inputs were supplied for {symbol}.",
             )
-        envelopes_by_symbol[symbol] = envelope
+        envelopes_by_symbol[symbol] = (provider, envelope)
 
     price_series: dict[str, pd.Series] = {}
     currencies: dict[str, str] = {}
@@ -328,21 +356,22 @@ def complete_market_bundle(
                 "evidence_workspace_invalid",
                 f"Workspace has neither evidence nor failure for {symbol}.",
             )
-        envelope = envelopes_by_symbol.get(symbol)
-        if envelope is None:
+        indexed_envelope = envelopes_by_symbol.get(symbol)
+        if indexed_envelope is None:
             raise DataGateError(
                 "fallback_not_supported",
                 f"No validated fallback input was supplied for {symbol}.",
                 {"symbol": symbol, "primary_failure": failures[symbol]},
             )
-        history = normalize_alpaca_envelope(
+        provider, envelope = indexed_envelope
+        history = active_normalizers[provider](
             envelope,
             start=str(workspace.get("start")),
             end=workspace.get("end"),
         )
         price_series[symbol] = history.series
         currencies[symbol] = history.currency
-        providers[symbol] = "alpaca"
+        providers[symbol] = str(history.receipt["provider"])
         receipts[symbol] = {**history.receipt, "primary_failure": failures[symbol]}
 
     fx_prices = {
