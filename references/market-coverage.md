@@ -71,13 +71,16 @@ Yahoo 검색이 현지어를 받지 못할 수 있다. 예를 들어 `삼성전�
 
 These canaries all returned `Missing[NotAvailable]`. 따라서 **Treasury lane was not operational at release-verification time**. 곡선, 10년 명목, TIPS, 경매평균, 유통시장 중 어느 lane도 release 시점 작동으로 주장할 수 없고, 다른 maturity·market·security type으로 대체해서도 안 된다. 이후 실제 요청은 새 plugin 호출과 완전한 requested/provider-observed qualifier 영수증을 요구한다.
 
-## 2026-08-17 Wolfram FX and labeled Treasury canaries
+## 2026-08-17 Wolfram FX and canonical Treasury canaries
 
 아래 역시 실행 시점 영수증인 **dated canary**이며 미래 가용성 약속이나 허용 목록이 아니다.
 
 - Official Wolfram plugin의 `FinancialData["KRW/USD", …]`와 `FinancialData["EUR/USD", …]`는 2026-08-03부터 2026-08-14까지 각각 10개의 날짜별 환율 관측치를 반환했다. 값은 각 통화 1단위의 USD 가치로 해석되는 direct pair였다.
 - 이 FX TimeSeries의 별도 원 공급자 source annotation과 `MetaInformation`은 제공되지 않았다. 따라서 영수증은 `Wolfram FinancialData`/official-plugin channel만 확인하고 underlying source annotation은 unavailable로 보존한다.
-- Official plugin의 labeled current U.S. Treasury yield curve는 2026-08-13 기준 3개월 3.87%, 1년 3.97%, 2년 4.15%, 5년 4.32%, 10년 4.63%, 30년 5.21%를 표시했다. 같은 만기의 exact structured qualifier query가 `Missing[NotAvailable]`였으므로 이 결과는 `provider_labeled_inferred`, not `provider_confirmed`, 로만 사용할 수 있다.
-- 만기별 historical query는 새 호출에서 날짜별 관측치를 실제로 반환하고 input interpretation이 요청 만기를 명시할 때만 lower-confidence history가 될 수 있다. 이번 canary에서 재현되지 않은 history는 가용하다고 주장하지 않는다.
+- 2026-08-16의 실패는 `MaturityDuration`을 잘못된 일반 수량 형태로 넣었던 query-shape에 한정된 historical receipt다. 2026-08-17 재검증에서는 `"3Month"`, `"1Year"`, `"2Year"`, `"5Year"`, `"10Year"`, `"30Year"` canonical strings와 각각 `Bill`, `Note`, `Bond`를 넣은 **structured canonical-string query**가 모두 성공했다. 따라서 앞선 “Treasury lane was not operational” 결론은 그 당시 query-shape에만 유효하며 현재 운영 판단을 지배하지 않는다.
+- `\[FreeformPrompt]["United States", "Country"]`로 국가 entity를 확인하고, exact `EntityProperty["Country", "Treasury", ...]`를 평가한 뒤 `TimeSeriesWindow`로 2026-08-03~2026-08-14 요청 범위를 잘랐다. 반환된 마지막 날짜는 2026-08-13이었으며 여섯 만기 모두 날짜가 있는 Percent 관측치를 **각 9개** 반환했다.
+- 2026-08-13 관측치는 3개월 3.87%, 1년 3.97%, 2년 4.15%, 5년 4.32%, 10년 4.63%, 30년 5.21%였다. 각 exact structured evaluation은 요청한 만기·증권종류와 일치하므로 완전한 envelope 검증을 거쳐 `provider_confirmed` 후보가 된다.
+- 3개월과 10년 natural-language query는 canonical maturity를 정확히 해석했다. 1년·2년·5년·30년 natural-language query는 일반 `Quantity`로 모호하게 해석되어 `Missing`이었지만, 같은 의도를 canonical string으로 고정한 structured query는 정상 데이터를 반환했다. 따라서 자연어 실패를 데이터 부재로 오판하지 않고 exact structured template을 사용한다.
+- Treasury property의 source annotation은 `FREDII`를 반환했다. 영수증에는 이 provider source entity를 그대로 보존하며, 화면 URL이나 `ClashPrefs`를 값의 출처로 쓰지 않는다.
 
-이 lower tier는 웹페이지 스크래핑, OCR, nearby maturity 대체가 아니다. official plugin이 반환한 명시적 label/input interpretation, 날짜, Percent 값, 실패한 exact query를 함께 보존하고 모든 의존 계산에 lower confidence를 전파하는 제한적 증거 경로다.
+이 성공 경로는 웹페이지 스크래핑, OCR, nearby maturity 대체가 아니다. 사용자가 제공한 URL의 `ClashPrefs`는 올바른 canonical interpretation을 확인하는 단서였을 뿐이며, 실제 값은 official plugin의 구조화 evaluator 결과에서 얻었다. 미래 호출에서 exact structured evaluation이 실패하고 labeled result만 남는 경우에는 기존 `provider_labeled_inferred` 하위 tier를 사용할 수 있지만, 그때는 모든 의존 계산에 lower confidence를 전파한다.

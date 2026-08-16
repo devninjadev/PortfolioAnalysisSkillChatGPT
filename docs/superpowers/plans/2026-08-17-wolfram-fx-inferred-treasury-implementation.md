@@ -215,3 +215,12 @@ def complete_market_bundle(
 - [ ] Merge `codex/wolfram-fallback-treasury` into local `main` without pushing.
 - [ ] Rerun the full unit suite, `git diff --check`, skill validation, and status checks on `main`.
 - [ ] Report the local main commit, test count, live canary results, known lower-confidence limitations, and the explicit fact that nothing was pushed or released.
+
+## Amendment: exact canonical-string Treasury route
+
+- [x] Add RED documentation-contract tests for the official-plugin `\[FreeformPrompt]` plus fixed `EntityProperty`/`TimeSeriesWindow` route.
+- [x] Preserve the 2026-08-16 `Missing[NotAvailable]` run as a historical query-shape receipt rather than a present availability claim.
+- [x] Verify `3Month` Bill, `1Year` Bill, `2Year` Note, `5Year` Note, `10Year` Note, and `30Year` Bond histories through the official plugin.
+- [x] Document `FREDII` source annotation and the six 2026-08-13 curve points.
+- [x] Keep `provider_labeled_inferred` available only when exact canonical evaluation still fails.
+- [ ] Validate strict live envelopes, rerun all deterministic/package gates, and merge the finished branch into local `main`.

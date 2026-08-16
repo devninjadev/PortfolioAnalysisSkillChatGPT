@@ -167,3 +167,11 @@ Lower-tier Treasury uses existing schema/entity/unit/maturity errors where appli
 Implementation follows RED-GREEN-REFACTOR for every behavior. Verification includes focused adapter, workspace, CLI, Treasury, and documentation-contract tests; the full unit suite; skill validation; a clean package inspection; and official-plugin canaries for direct FX, inverse FX, labeled current Treasury curves, and a historical lower-tier Treasury request when the plugin returns dated evidence. Live provider absence is reported separately from deterministic correctness.
 
 After all gates pass, the feature branch is merged into local `main` and the full suite is rerun on `main`. No remote push or release is included.
+
+## 2026-08-17 Canonical Treasury Query Amendment
+
+Later official-plugin verification corrected the earlier operational diagnosis. The `Missing[NotAvailable]` exact probes had used a generic typed-year qualifier shape that Wolfram did not resolve as the canonical Treasury maturity token. User-provided WolframAlpha interpretation URLs exposed canonical `ClashPrefs` values such as `3Month`, `1Year`, `2Year`, `5Year`, `10Year`, and `30Year`, but the URLs themselves remain outside the data path.
+
+The approved plugin-only route now compiles structured LLM intent into a fixed `EntityProperty["Country", "Treasury", ...]` expression using those canonical strings and the semantically classified `Bill`, `Note`, or `Bond` security type. `\[FreeformPrompt]["United States", "Country"]` resolves the country entity, `TimeSeriesWindow` selects the requested range, and the source property is queried separately. No direct HTTP, public-page scraping, URL execution, OCR, or arbitrary Wolfram Language generation is introduced.
+
+Official-plugin canaries returned nine dated Percent observations from 2026-08-03 through 2026-08-13 for all six requested nominal maturities. Exact canonical evaluation plus matching qualifier, typed maturity, unit, date, and source receipts is eligible for `provider_confirmed`. The existing `provider_labeled_inferred` tier remains as a disclosed fallback only when exact canonical evaluation is unavailable but the official plugin still supplies adequate labeled maturity/date/unit evidence.

@@ -227,6 +227,23 @@ Errors are `wolfram_fx_schema_error`, `wolfram_fx_pair_mismatch`, `wolfram_fx_un
 
 U.S. Treasury evidence also comes only from the official Wolfram plugin. The LLM emits the requested structured qualifiers; the deterministic harness accepts the documented vocabulary but does not infer a qualifier from a text parser. A complete nominal 3-month daily constant-maturity history envelope is:
 
+The preferred retrieval path compiles the LLM's structured Treasury intent into a fixed Wolfram Language property expression. It never executes WolframAlpha webpage parameters as code and never reads a rendered result page. The canonical nominal maturities verified on 2026-08-17 were `"3Month"`, `"1Year"`, `"2Year"`, `"5Year"`, `"10Year"`, and `"30Year"`; the associated security types were `"Bill"`, `"Note"`, and `"Bond"`. A 10-year example is:
+
+```wl
+property = EntityProperty["Country", "Treasury", {
+  "Date" -> All,
+  "DueDate" -> "ConstantMaturity",
+  "Frequency" -> "Daily",
+  "MaturityDuration" -> "10Year",
+  "SecurityType" -> "Note"
+}];
+series = \[FreeformPrompt]["United States", "Country"][property];
+Normal[TimeSeriesWindow[series, {start, end}]]
+property["Source"]
+```
+
+The successful evaluator result must contain dated `Quantity[..., "Percent"]` values. The evaluated property expression is preserved as the provider-observed qualifier receipt, the classifier's typed maturity is preserved separately, and the source annotation is copied without rewriting it; the live probe identified `FREDII`. A natural-language `\[FreeformPrompt]` may be used as interpretation evidence, but if it turns a duration into an ambiguous generic `Quantity`, it does not override the structured intent. The fixed template is retried with the canonical string, and all requested/provider-observed qualifier and numeric maturity gates still apply. The query becomes `provider_confirmed` only after this exact structured evaluation succeeds; a labeled result without exact evaluation remains `provider_labeled_inferred`.
+
 ```json
 {
   "schema_version": 1,

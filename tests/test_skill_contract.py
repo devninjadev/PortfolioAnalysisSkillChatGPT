@@ -116,11 +116,13 @@ class SkillContractTests(unittest.TestCase):
         self.assertNotIn("계속 unavailable이다", text)
         self.assertIn("nearby maturity로 대체하지 않는다", text)
 
-    def test_latest_release_verification_discloses_all_treasury_lanes_unavailable(self) -> None:
+    def test_old_release_verification_remains_scoped_as_historical_failure(self) -> None:
         text = (ROOT / "references" / "market-coverage.md").read_text(encoding="utf-8")
         latest_heading = "## 2026-08-16 later release verification — Treasury unavailable"
         self.assertIn(latest_heading, text)
-        latest = text[text.index(latest_heading) :]
+        next_heading = "## 2026-08-17 Wolfram FX and canonical Treasury canaries"
+        self.assertIn(next_heading, text)
+        latest = text[text.index(latest_heading) : text.index(next_heading)]
         for lane in (
             "exact-maturity curve",
             "10-year nominal history",
@@ -132,6 +134,46 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("all returned `Missing[NotAvailable]`", latest)
         self.assertIn("Treasury lane was not operational at release-verification time", latest)
         self.assertIn("earlier successful probes are historical only", latest)
+
+    def test_canonical_treasury_plugin_route_and_live_canaries_are_documented(self) -> None:
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        contract = (ROOT / "references" / "data-contract.md").read_text(encoding="utf-8")
+        coverage = (ROOT / "references" / "market-coverage.md").read_text(encoding="utf-8")
+
+        for token in (
+            "\\[FreeformPrompt]",
+            "TimeSeriesWindow",
+            '"MaturityDuration" -> "10Year"',
+            '"SecurityType" -> "Note"',
+            "ClashPrefs is interpretation evidence, not a webpage data source",
+        ):
+            self.assertIn(token, skill)
+        for token in (
+            '"3Month"',
+            '"1Year"',
+            '"2Year"',
+            '"5Year"',
+            '"10Year"',
+            '"30Year"',
+            "provider_confirmed",
+            "FREDII",
+        ):
+            self.assertIn(token, contract)
+        for token in (
+            "## 2026-08-17 Wolfram FX and canonical Treasury canaries",
+            "structured canonical-string query",
+            "3개월 3.87%",
+            "1년 3.97%",
+            "2년 4.15%",
+            "5년 4.32%",
+            "10년 4.63%",
+            "30년 5.21%",
+            "각 9개",
+            "FREDII",
+            "provider_confirmed",
+        ):
+            self.assertIn(token, coverage)
+        self.assertNotIn("웹페이지를 데이터로 읽는다", coverage)
 
     def test_envelope_contract_requires_structured_identity_units_and_provider_echoes(self) -> None:
         text = (ROOT / "references" / "data-contract.md").read_text(encoding="utf-8")
