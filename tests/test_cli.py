@@ -18,6 +18,8 @@ from advisor_data import DataGateError  # noqa: E402
 from advisor_data.market_data import MarketBundle  # noqa: E402
 from advisor_data_cli import main  # noqa: E402
 from tests.test_alpaca import bar, crypto_envelope  # noqa: E402
+from tests.test_treasury import treasury_envelope, treasury_observation  # noqa: E402
+from tests.test_wolfram import financial_envelope, observation  # noqa: E402
 
 
 class FakeGateway:
@@ -184,6 +186,52 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload["validation"]["symbol"], "BTC-USD")
         self.assertEqual(payload["normalized"]["observation_count"], 2)
 
+    def test_wolfram_validate_emits_normalized_receipt(self) -> None:
+        envelope = financial_envelope(
+            observations=[
+                observation("2026-01-05T00:00:00+00:00", 100.0),
+                observation("2026-01-12T00:00:00+00:00", 101.0),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = self._write_json(tmp, "aapl-wolfram.json", envelope)
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        "wolfram-validate",
+                        "--input",
+                        str(input_path),
+                        "--start",
+                        "2026-01-01",
+                        "--end",
+                        "2026-02-01",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["validation"]["provider"], "wolfram")
+        self.assertEqual(payload["normalized"]["observation_count"], 2)
+
+    def test_treasury_validate_emits_qualifiers_and_range(self) -> None:
+        envelope = treasury_envelope(
+            observations=[
+                treasury_observation("2026-08-12T00:00:00+00:00", 4.55),
+                treasury_observation("2026-08-13T00:00:00+00:00", 4.63),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = self._write_json(tmp, "us10y-wolfram.json", envelope)
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = main(["treasury-validate", "--input", str(input_path)])
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["validation"]["qualifiers"]["maturity_duration"], "10Year")
+        self.assertEqual(payload["normalized"]["observation_count"], 2)
+
     def test_prepare_and_complete_portfolio_merge_alpaca_history(self) -> None:
         index = pd.to_datetime(
             [
@@ -269,6 +317,94 @@ class CliTests(unittest.TestCase):
         self.assertEqual(
             complete_payload["download_receipt"]["providers"],
             {"AAPL": "yahoo", "BTC-USD": "alpaca"},
+        )
+        self.assertEqual(complete_payload["return_receipt"]["observation_count"], 3)
+        self.assertIn("minimum_variance", complete_payload["portfolio_candidates"])
+
+    def test_prepare_and_complete_portfolio_merge_wolfram_history(self) -> None:
+        index = pd.to_datetime(
+            [
+                "2026-01-05T00:00:00+00:00",
+                "2026-01-12T00:00:00+00:00",
+                "2026-01-19T00:00:00+00:00",
+                "2026-01-26T00:00:00+00:00",
+            ]
+        )
+
+        def loader(*, symbols: list[str], **_: object) -> MarketBundle:
+            if symbols == ["AAPL"]:
+                return MarketBundle(
+                    prices=pd.DataFrame(
+                        {"AAPL": [100.0, 102.0, 101.0, 104.0]},
+                        index=index,
+                    ),
+                    currencies={"AAPL": "USD"},
+                    fx_prices={},
+                    receipt={"source": "Yahoo fixture"},
+                )
+            raise DataGateError(
+                "price_history_unavailable",
+                "Yahoo returned no usable MSFT price history.",
+            )
+
+        envelope = financial_envelope(
+            symbol="MSFT",
+            provider_entity="NASDAQ:MSFT",
+            observations=[
+                observation("2026-01-05T00:00:00+00:00", 200.0),
+                observation("2026-01-12T00:00:00+00:00", 202.0),
+                observation("2026-01-19T00:00:00+00:00", 201.0),
+                observation("2026-01-26T00:00:00+00:00", 204.0),
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_path = Path(tmp) / "workspace.json"
+            wolfram_path = self._write_json(tmp, "msft-wolfram.json", envelope)
+            prepare_stdout = io.StringIO()
+            with redirect_stdout(prepare_stdout):
+                prepare_code = main(
+                    [
+                        "prepare-portfolio",
+                        "--symbols",
+                        "AAPL",
+                        "MSFT",
+                        "--start",
+                        "2026-01-01",
+                        "--end",
+                        "2026-02-01",
+                        "--base-currency",
+                        "USD",
+                        "--workspace",
+                        str(workspace_path),
+                    ],
+                    market_loader=loader,
+                )
+            complete_stdout = io.StringIO()
+            with redirect_stdout(complete_stdout):
+                complete_code = main(
+                    [
+                        "complete-portfolio",
+                        "--workspace",
+                        str(workspace_path),
+                        "--wolfram-input",
+                        str(wolfram_path),
+                        "--frequency",
+                        "weekly",
+                        "--min-observations",
+                        "3",
+                        "--max-weight",
+                        "1.0",
+                    ]
+                )
+
+        prepare_payload = json.loads(prepare_stdout.getvalue())
+        complete_payload = json.loads(complete_stdout.getvalue())
+        self.assertEqual(prepare_code, 0)
+        self.assertEqual(prepare_payload["fallback_required_symbols"], ["MSFT"])
+        self.assertEqual(complete_code, 0)
+        self.assertEqual(
+            complete_payload["download_receipt"]["providers"],
+            {"AAPL": "yahoo", "MSFT": "wolfram"},
         )
         self.assertEqual(complete_payload["return_receipt"]["observation_count"], 3)
         self.assertIn("minimum_variance", complete_payload["portfolio_candidates"])

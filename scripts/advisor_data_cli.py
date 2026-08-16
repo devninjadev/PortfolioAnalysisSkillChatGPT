@@ -69,6 +69,20 @@ def build_parser() -> argparse.ArgumentParser:
     alpaca_validate.add_argument("--start", required=True)
     alpaca_validate.add_argument("--end")
 
+    wolfram_validate = subparsers.add_parser(
+        "wolfram-validate",
+        help="Validate a structured Wolfram financial fallback envelope",
+    )
+    wolfram_validate.add_argument("--input", required=True)
+    wolfram_validate.add_argument("--start", required=True)
+    wolfram_validate.add_argument("--end")
+
+    treasury_validate = subparsers.add_parser(
+        "treasury-validate",
+        help="Validate a structured Wolfram U.S. Treasury envelope",
+    )
+    treasury_validate.add_argument("--input", required=True)
+
     portfolio = subparsers.add_parser("portfolio", help="Build evidence-gated multi-market candidates")
     portfolio.add_argument("--symbols", nargs="+", required=True)
     portfolio.add_argument("--start", required=True)
@@ -94,6 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     complete.add_argument("--workspace", required=True)
     complete.add_argument("--alpaca-input", action="append", default=[])
+    complete.add_argument("--wolfram-input", action="append", default=[])
     complete.add_argument("--frequency", choices=["weekly", "daily"], default="weekly")
     complete.add_argument("--min-observations", type=int, default=104)
     complete.add_argument("--max-weight", type=float, default=0.7)
@@ -107,6 +122,8 @@ def main(
     workspace_preparer: Callable[..., Any] | None = None,
     workspace_completer: Callable[..., Any] | None = None,
     alpaca_normalizer: Callable[..., Any] | None = None,
+    wolfram_normalizer: Callable[..., Any] | None = None,
+    treasury_normalizer: Callable[..., Any] | None = None,
 ) -> int:
     args = build_parser().parse_args(argv)
     runtime_receipt: dict[str, Any] | None = None
@@ -122,6 +139,8 @@ def main(
         )
         from advisor_data.market_data import build_return_matrix, download_market_bundle
         from advisor_data.portfolio import build_portfolio_candidates
+        from advisor_data.treasury import normalize_treasury_envelope
+        from advisor_data.wolfram import normalize_wolfram_envelope
         from advisor_data.yahoo import YahooGateway
 
         yahoo = gateway or YahooGateway()
@@ -129,6 +148,8 @@ def main(
         active_workspace_preparer = workspace_preparer or prepare_yahoo_workspace
         active_workspace_completer = workspace_completer or complete_market_bundle
         active_alpaca_normalizer = alpaca_normalizer or normalize_alpaca_envelope
+        active_wolfram_normalizer = wolfram_normalizer or normalize_wolfram_envelope
+        active_treasury_normalizer = treasury_normalizer or normalize_treasury_envelope
         if args.command == "search":
             queries = list(dict.fromkeys([args.query, *args.query_variant]))
             candidate_by_symbol: dict[str, dict[str, Any]] = {}
@@ -199,6 +220,43 @@ def main(
                 sys.stdout,
             )
             return 0
+        if args.command == "wolfram-validate":
+            history = active_wolfram_normalizer(
+                _read_json(args.input),
+                start=args.start,
+                end=args.end,
+            )
+            _emit(
+                {
+                    "status": "ok",
+                    "runtime_receipt": runtime_receipt,
+                    "validation": history.receipt,
+                    "normalized": {
+                        "observation_count": len(history.series),
+                        "first_at": history.series.index.min().isoformat(),
+                        "last_at": history.series.index.max().isoformat(),
+                    },
+                },
+                sys.stdout,
+            )
+            return 0
+        if args.command == "treasury-validate":
+            treasury = active_treasury_normalizer(_read_json(args.input))
+            _emit(
+                {
+                    "status": "ok",
+                    "runtime_receipt": runtime_receipt,
+                    "validation": treasury.receipt,
+                    "normalized": {
+                        "observation_count": len(treasury.series),
+                        "first_at": treasury.series.index.min().isoformat(),
+                        "last_at": treasury.series.index.max().isoformat(),
+                        "maturity_years": treasury.maturity_years,
+                    },
+                },
+                sys.stdout,
+            )
+            return 0
         if args.command == "portfolio":
             if len(args.symbols) < 2:
                 raise DataGateError("insufficient_assets", "MPT requires at least two symbols.")
@@ -258,7 +316,10 @@ def main(
             symbols = list(workspace.get("symbols", []))
             if len(symbols) < 2:
                 raise DataGateError("insufficient_assets", "MPT requires at least two symbols.")
-            envelopes = [_read_json(path) for path in args.alpaca_input]
+            envelopes = [
+                *(_read_json(path) for path in args.alpaca_input),
+                *(_read_json(path) for path in args.wolfram_input),
+            ]
             bundle = active_workspace_completer(workspace, envelopes)
             matrix = build_return_matrix(
                 bundle.prices,
