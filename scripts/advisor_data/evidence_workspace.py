@@ -278,6 +278,9 @@ def prepare_yahoo_workspace(
                 _merge_fx(fx_series, str(currency).upper(), series)
             for currency, receipt in bundle.receipt.get("fx_pairs", {}).items():
                 fx_receipts[str(currency).upper()] = dict(receipt)
+            for currency, failure in bundle.receipt.get("fx_failures", {}).items():
+                if isinstance(failure, Mapping):
+                    fx_failures[str(currency).upper()] = dict(failure)
         except DataGateError as exc:
             if not _is_fallback_eligible_yahoo_failure(exc):
                 raise
@@ -322,6 +325,7 @@ def prepare_yahoo_workspace(
             )
             _merge_fx(fx_series, required_currency, series)
             fx_receipts[required_currency] = dict(receipt)
+            fx_failures.pop(required_currency, None)
         except DataGateError as exc:
             fx_failures[required_currency] = _error_payload(exc)
         except Exception as exc:
@@ -350,6 +354,7 @@ def prepare_yahoo_workspace(
         },
         "fx_receipts": fx_receipts,
         "fx_failures": fx_failures,
+        "fallback_required_fx": sorted(required_fx - set(fx_series)),
         "retrieved_at": retrieved_at,
     }
 
@@ -589,6 +594,9 @@ def workspace_summary(workspace: Mapping[str, Any]) -> dict[str, Any]:
         "workspace_symbols": workspace.get("symbols", []),
         "yahoo_completed_symbols": list(workspace.get("assets", {})),
         "fallback_required_symbols": list(workspace.get("failures", {})),
+        "fallback_required_fx": list(
+            workspace.get("fallback_required_fx", workspace.get("fx_failures", {}))
+        ),
         "fx_failures": workspace.get("fx_failures", {}),
     }
 

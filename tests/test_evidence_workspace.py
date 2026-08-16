@@ -201,7 +201,7 @@ class EvidenceWorkspaceTests(unittest.TestCase):
         )
         self.assertIn("EUR", workspace["fx_prices"])
 
-    def test_actual_currency_and_fx_network_failures_remain_blocking(self) -> None:
+    def test_actual_currency_network_failure_remains_blocking(self) -> None:
         def asset_prices(**kwargs: object) -> pd.DataFrame:
             if kwargs["tickers"] == ["SAP.DE"]:
                 return pd.DataFrame({"Close": [200.0, 202.0]}, index=INDEX)
@@ -214,6 +214,34 @@ class EvidenceWorkspaceTests(unittest.TestCase):
             def get_history_metadata(self) -> dict[str, str]:
                 raise ConnectionError("Yahoo currency metadata transport failed")
 
+        def actual_market_loader(**kwargs: object) -> MarketBundle:
+            return download_market_bundle(
+                **kwargs,
+                downloader=asset_prices,
+                ticker_factory=CurrencyNetworkFailure,
+            )
+
+        with self.assertRaises(DataGateError) as raised:
+            prepare_yahoo_workspace(
+                ["SAP.DE"],
+                "2026-01-01",
+                "2026-02-01",
+                "USD",
+                market_loader=actual_market_loader,
+                currency_loader=lambda **_: self.fail(
+                    "Currency-stage bundle failure must remain blocking."
+                ),
+            )
+
+        self.assertEqual(raised.exception.code, "currency_unavailable")
+        self.assertEqual(raised.exception.details.get("stage"), "currency_metadata")
+
+    def test_actual_fx_network_failure_is_preserved_for_fallback(self) -> None:
+        def asset_prices(**kwargs: object) -> pd.DataFrame:
+            if kwargs["tickers"] == ["SAP.DE"]:
+                return pd.DataFrame({"Close": [200.0, 202.0]}, index=INDEX)
+            raise ConnectionError("Yahoo FX transport failed")
+
         class EuroMetadata:
             def __init__(self, _: str) -> None:
                 pass
@@ -221,32 +249,45 @@ class EvidenceWorkspaceTests(unittest.TestCase):
             def get_history_metadata(self) -> dict[str, str]:
                 return {"currency": "EUR"}
 
-        for expected_code, expected_stage, ticker_factory in (
-            ("currency_unavailable", "currency_metadata", CurrencyNetworkFailure),
-            ("fx_history_unavailable", "fx_history", EuroMetadata),
-        ):
-            with self.subTest(stage=expected_stage):
-                def actual_market_loader(**kwargs: object) -> MarketBundle:
-                    return download_market_bundle(
-                        **kwargs,
-                        downloader=asset_prices,
-                        ticker_factory=ticker_factory,
-                    )
+        def actual_market_loader(**kwargs: object) -> MarketBundle:
+            return download_market_bundle(
+                **kwargs,
+                downloader=asset_prices,
+                ticker_factory=EuroMetadata,
+            )
 
-                with self.assertRaises(DataGateError) as raised:
-                    prepare_yahoo_workspace(
-                        ["SAP.DE"],
-                        "2026-01-01",
-                        "2026-02-01",
-                        "USD",
-                        market_loader=actual_market_loader,
-                        currency_loader=lambda **_: self.fail(
-                            "Currency/FX-stage bundle failure must remain blocking."
-                        ),
-                    )
+        workspace = prepare_yahoo_workspace(
+            ["SAP.DE"],
+            "2026-01-01",
+            "2026-02-01",
+            "USD",
+            market_loader=actual_market_loader,
+            base_fx_loader=lambda **_: (_ for _ in ()).throw(
+                DataGateError(
+                    "fx_history_unavailable",
+                    "Yahoo EUR FX failed independently.",
+                    {"stage": "fx_history", "currency": "EUR"},
+                )
+            ),
+        )
 
-                self.assertEqual(raised.exception.code, expected_code)
-                self.assertEqual(raised.exception.details.get("stage"), expected_stage)
+        self.assertIn("SAP.DE", workspace["assets"])
+        self.assertEqual(workspace["fallback_required_fx"], ["EUR"])
+        self.assertEqual(workspace["fx_failures"]["EUR"]["code"], "fx_history_unavailable")
+        self.assertEqual(workspace["fx_failures"]["EUR"]["details"]["stage"], "fx_history")
+
+    def test_yahoo_successful_fx_is_not_marked_for_fallback(self) -> None:
+        workspace = prepare_yahoo_workspace(
+            ["SAP.DE"],
+            "2026-01-01",
+            "2026-02-01",
+            "USD",
+            market_loader=lambda **_: yahoo_bundle("SAP.DE", [200.0, 202.0], currency="EUR"),
+            base_fx_loader=yahoo_fx,
+        )
+
+        self.assertIn("EUR", workspace["fx_prices"])
+        self.assertEqual(workspace["fallback_required_fx"], [])
 
     def test_fallback_currency_must_match_stored_yahoo_currency(self) -> None:
         workspace = prepare_yahoo_workspace(

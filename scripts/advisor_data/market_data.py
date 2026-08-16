@@ -246,12 +246,20 @@ def download_market_bundle(
 
     fx_prices: dict[str, pd.Series] = {}
     fx_pairs: dict[str, dict[str, str]] = {}
+    fx_failures: dict[str, dict[str, Any]] = {}
     fx_options = dict(options)
     fx_options.update({"auto_adjust": False, "actions": False, "repair": False})
     for currency in sorted(required_fx):
-        series, pair_receipt = _download_usd_per_currency(currency, downloader, fx_options)
-        fx_prices[currency] = series
-        fx_pairs[currency] = pair_receipt
+        try:
+            series, pair_receipt = _download_usd_per_currency(currency, downloader, fx_options)
+            fx_prices[currency] = series
+            fx_pairs[currency] = pair_receipt
+        except DataGateError as exc:
+            fx_failures[currency] = {
+                "code": exc.code,
+                "message": exc.message,
+                "details": exc.details,
+            }
 
     try:
         repaired = _extract_field(raw_prices, "Repaired?", symbols)
@@ -274,6 +282,7 @@ def download_market_bundle(
             "asset_currency_units": {symbol: spec[2] for symbol, spec in currency_specs.items()},
             "normalized_asset_currencies": {symbol: spec[0] for symbol, spec in currency_specs.items()},
             "fx_pairs": fx_pairs,
+            "fx_failures": fx_failures,
             "supported_by_runtime": sorted({base, *(spec[0] for spec in currency_specs.values())}),
             "auto_adjust": True,
             "actions": True,
