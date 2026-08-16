@@ -37,24 +37,42 @@ def treasury_envelope(
     coupon_rate: float | None = None,
     observations: list[dict[str, object]],
 ) -> dict[str, object]:
+    qualifiers = {
+        "security_type": security_type,
+        "maturity_duration": maturity_duration,
+        "market": market,
+        "due_date": due_date,
+        "frequency": frequency,
+        "time_series_operator": time_series_operator,
+        "coupon_rate": coupon_rate,
+    }
     return {
         "schema_version": 1,
         "provider": "wolfram",
         "evidence_kind": evidence_kind,
         "country_entity": "UnitedStates",
-        "qualifiers": {
-            "security_type": security_type,
-            "maturity_duration": maturity_duration,
-            "market": market,
-            "due_date": due_date,
-            "frequency": frequency,
-            "time_series_operator": time_series_operator,
-            "coupon_rate": coupon_rate,
+        "qualifiers": qualifiers,
+        "request": {
+            "start": "2025-01-01",
+            "end": "2026-08-13",
+            "requested_qualifiers": dict(qualifiers),
+            "requested_maturity": {
+                "duration": maturity_duration,
+                "years": maturity_years,
+                "unit": "years",
+                "evidence_kind": "classifier_typed_request",
+            },
         },
-        "request": {"start": "2025-01-01", "end": "2026-08-13"},
         "result": {
             "property": "Treasury",
             "maturity_years": maturity_years,
+            "observed_qualifiers": dict(qualifiers),
+            "observed_maturity": {
+                "duration": maturity_duration,
+                "years": maturity_years,
+                "unit": "years",
+                "evidence_kind": "provider_observed_typed",
+            },
             "unit": "Percent",
             "observations": observations,
             "missing": [],
@@ -143,10 +161,68 @@ class TreasuryEnvelopeTests(unittest.TestCase):
                 treasury_observation("2026-08-13", 4.63),
             ]
         )
-        envelope["request"]["qualifiers"] = dict(envelope["qualifiers"])
-        envelope["result"]["qualifiers"] = dict(envelope["qualifiers"])
-        envelope["result"]["qualifiers"]["maturity_duration"] = "5Year"
+        envelope["result"]["observed_qualifiers"]["frequency"] = "Weekly"
         with self.assertRaisesRegex(DataGateError, "wolfram_qualifier_mismatch"):
+            normalize_treasury_envelope(envelope)
+
+    def test_success_requires_complete_requested_and_observed_qualifier_echoes(self) -> None:
+        for location, key in (
+            (("request",), "requested_qualifiers"),
+            (("result",), "observed_qualifiers"),
+        ):
+            with self.subTest(key=key):
+                envelope = treasury_envelope(
+                    observations=[
+                        treasury_observation("2026-08-12", 4.55),
+                        treasury_observation("2026-08-13", 4.63),
+                    ]
+                )
+                del envelope[location[0]][key]
+                with self.assertRaisesRegex(DataGateError, "wolfram_qualifier_mismatch"):
+                    normalize_treasury_envelope(envelope)
+
+        envelope = treasury_envelope(
+            observations=[
+                treasury_observation("2026-08-12", 4.55),
+                treasury_observation("2026-08-13", 4.63),
+            ]
+        )
+        del envelope["result"]["observed_qualifiers"]["coupon_rate"]
+        with self.assertRaisesRegex(DataGateError, "wolfram_qualifier_mismatch"):
+            normalize_treasury_envelope(envelope)
+
+    def test_success_requires_provider_typed_numeric_maturity_evidence(self) -> None:
+        envelope = treasury_envelope(
+            observations=[
+                treasury_observation("2026-08-12", 4.55),
+                treasury_observation("2026-08-13", 4.63),
+            ]
+        )
+        del envelope["result"]["observed_maturity"]
+        with self.assertRaisesRegex(DataGateError, "treasury_maturity_mismatch"):
+            normalize_treasury_envelope(envelope)
+
+    def test_typed_requested_and_observed_maturity_must_agree_numerically(self) -> None:
+        envelope = treasury_envelope(
+            observations=[
+                treasury_observation("2026-08-12", 4.55),
+                treasury_observation("2026-08-13", 4.63),
+            ]
+        )
+        envelope["result"]["maturity_years"] = 2.0
+        envelope["result"]["observed_maturity"]["years"] = 2.0
+        with self.assertRaisesRegex(DataGateError, "treasury_maturity_mismatch"):
+            normalize_treasury_envelope(envelope)
+
+    def test_unavailable_missing_envelope_need_not_claim_observed_qualifiers(self) -> None:
+        envelope = treasury_envelope(observations=[])
+        envelope["result"]["missing"] = [
+            {"reason": "NotAvailable", "maturity_duration": "10Year"}
+        ]
+        del envelope["result"]["observed_qualifiers"]
+        del envelope["result"]["observed_maturity"]
+        del envelope["result"]["maturity_years"]
+        with self.assertRaisesRegex(DataGateError, "treasury_maturity_unavailable"):
             normalize_treasury_envelope(envelope)
 
     def test_unavailable_series_stays_unavailable(self) -> None:
@@ -268,12 +344,12 @@ class TreasuryEnvelopeTests(unittest.TestCase):
 
     def test_finite_coupon_rate_is_preserved(self) -> None:
         envelope = treasury_envelope(
+            coupon_rate=2.875,
             observations=[
                 treasury_observation("2026-08-12", 4.55),
                 treasury_observation("2026-08-13", 4.63),
             ]
         )
-        envelope["qualifiers"]["coupon_rate"] = 2.875
         result = normalize_treasury_envelope(envelope)
         self.assertEqual(result.receipt["qualifiers"]["coupon_rate"], 2.875)
 
@@ -285,7 +361,7 @@ class TreasuryEnvelopeTests(unittest.TestCase):
             ]
         )
         maturity_envelope["result"]["maturity_years"] = "10.0"
-        with self.assertRaisesRegex(DataGateError, "wolfram_schema_error"):
+        with self.assertRaisesRegex(DataGateError, "treasury_maturity_mismatch"):
             normalize_treasury_envelope(maturity_envelope)
 
         yield_envelope = treasury_envelope(
@@ -488,6 +564,27 @@ class RiskFreeRateTests(unittest.TestCase):
         self.assertAlmostEqual(result.series.iloc[0], (1.05 ** (1.0 / 52.0)) - 1.0)
         self.assertEqual(result.receipt["conversion"], "effective_annual_to_periodic")
         self.assertEqual(result.receipt["max_fill_days"], 3)
+        aligned = result.receipt["aligned_observations"]
+        self.assertEqual(aligned[0]["raw_annual_percent"], 5.0)
+        self.assertAlmostEqual(
+            aligned[0]["periodic_rate"], (1.05 ** (1.0 / 52.0)) - 1.0
+        )
+        self.assertEqual(result.receipt["unit"], "Percent")
+        self.assertEqual(result.receipt["evidence_kind"], "us_treasury_history")
+        self.assertEqual(result.receipt["retrieved_at"], "2026-08-16T00:00:00+00:00")
+        self.assertEqual(
+            result.receipt["requested_range"],
+            {
+                "start": "2025-01-01T00:00:00+00:00",
+                "end": "2026-08-13T00:00:00+00:00",
+            },
+        )
+        self.assertEqual(result.receipt["missing"], [])
+        self.assertEqual(result.receipt["upstream_provenance"]["provider"], "wolfram")
+        self.assertEqual(
+            result.receipt["upstream_provenance"]["sources"][0]["organization"],
+            "Federal Reserve Bank of St. Louis",
+        )
 
     def test_negative_yield_above_minus_one_hundred_percent_is_supported(self) -> None:
         treasury = normalize_treasury_envelope(

@@ -31,6 +31,15 @@ SUPPORTED_OPERATORS = frozenset(
 SUPPORTED_EVIDENCE_KINDS = frozenset(
     {"us_treasury_current", "us_treasury_history"}
 )
+QUALIFIER_KEYS = (
+    "security_type",
+    "maturity_duration",
+    "market",
+    "due_date",
+    "frequency",
+    "time_series_operator",
+    "coupon_rate",
+)
 
 
 @dataclass(frozen=True)
@@ -202,18 +211,9 @@ def _coverage_status(series: pd.Series, requested: Mapping[str, str | None]) -> 
 
 
 def _validate_qualifiers(qualifiers: Mapping[str, Any]) -> dict[str, Any]:
-    allowed = {
-        "security_type",
-        "maturity_duration",
-        "market",
-        "due_date",
-        "frequency",
-        "time_series_operator",
-        "coupon_rate",
-    }
     preserved = dict(qualifiers)
     for key in qualifiers:
-        if key not in allowed:
+        if key not in QUALIFIER_KEYS:
             raise DataGateError(
                 "wolfram_schema_error",
                 f"Wolfram Treasury qualifier {key} is not recognized.",
@@ -253,37 +253,82 @@ def _validate_qualifiers(qualifiers: Mapping[str, Any]) -> dict[str, Any]:
     return preserved
 
 
-def _qualifier_agreement(
-    declared: Mapping[str, Any], request: Mapping[str, Any], result: Mapping[str, Any]
-) -> None:
-    nested: list[tuple[str, Mapping[str, Any]]] = []
-    for label, value in (("request", request), ("result", result)):
-        for key in ("qualifiers", "requested_qualifiers", "observed_qualifiers"):
-            if key in value:
-                nested.append((f"{label}.{key}", _mapping(value[key], f"{label} {key}")))
-    for label, qualifiers in nested:
-        for key, value in qualifiers.items():
-            if key not in declared or value != declared[key]:
-                raise DataGateError(
-                    "wolfram_qualifier_mismatch",
-                    "Wolfram Treasury requested and observed qualifiers disagree.",
-                    {"qualifier": key, "declared": declared.get(key), label: value},
-                )
-    for label, value in (("request", request), ("result", result)):
-        for key in declared:
-            if key in value and value[key] != declared[key]:
-                raise DataGateError(
-                    "wolfram_qualifier_mismatch",
-                    "Wolfram Treasury requested and observed qualifiers disagree.",
-                    {"qualifier": key, "declared": declared[key], label: value[key]},
-                )
-    result_maturity = result.get("maturity_duration")
-    if result_maturity is not None and result_maturity != declared.get("maturity_duration"):
+def _complete_qualifier_echo(
+    container: Mapping[str, Any], key: str, label: str
+) -> dict[str, Any]:
+    if key not in container or not isinstance(container.get(key), Mapping):
         raise DataGateError(
             "wolfram_qualifier_mismatch",
-            "Wolfram Treasury result maturity differs from the requested maturity.",
-            {"requested": declared.get("maturity_duration"), "observed": result_maturity},
+            f"Wolfram Treasury evidence is missing complete {label} qualifiers.",
+            {"missing_echo": key},
         )
+    qualifiers = _mapping(container[key], f"Treasury {label} qualifiers")
+    missing_keys = [name for name in QUALIFIER_KEYS if name not in qualifiers]
+    extra_keys = [name for name in qualifiers if name not in QUALIFIER_KEYS]
+    if missing_keys or extra_keys:
+        raise DataGateError(
+            "wolfram_qualifier_mismatch",
+            f"Wolfram Treasury {label} qualifiers are incomplete.",
+            {"missing_qualifiers": missing_keys, "extra_qualifiers": extra_keys},
+        )
+    return _validate_qualifiers(qualifiers)
+
+
+def _qualifiers_must_match(
+    declared: Mapping[str, Any], echoed: Mapping[str, Any], label: str
+) -> None:
+    for key in QUALIFIER_KEYS:
+        if declared.get(key) != echoed.get(key):
+            raise DataGateError(
+                "wolfram_qualifier_mismatch",
+                "Wolfram Treasury requested and observed qualifiers disagree.",
+                {
+                    "qualifier": key,
+                    "declared": declared.get(key),
+                    label: echoed.get(key),
+                },
+            )
+
+
+def _typed_maturity(
+    value: Any,
+    label: str,
+    *,
+    expected_evidence_kind: str,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise DataGateError(
+            "treasury_maturity_mismatch",
+            f"Treasury {label} typed maturity evidence is required.",
+        )
+    duration = value.get("duration")
+    unit = value.get("unit")
+    evidence_kind = value.get("evidence_kind")
+    try:
+        years = _finite_number(value.get("years"), f"Treasury {label} maturity years", positive=True)
+    except DataGateError as exc:
+        raise DataGateError(
+            "treasury_maturity_mismatch",
+            f"Treasury {label} maturity requires provider-typed numeric years.",
+            {"years": value.get("years")},
+        ) from exc
+    if (
+        not isinstance(duration, str)
+        or not duration.strip()
+        or unit != "years"
+        or evidence_kind != expected_evidence_kind
+    ):
+        raise DataGateError(
+            "treasury_maturity_mismatch",
+            f"Treasury {label} typed maturity evidence is malformed.",
+            {"maturity": dict(value)},
+        )
+    return {
+        "duration": duration.strip(),
+        "years": years,
+        "unit": "years",
+        "evidence_kind": expected_evidence_kind,
+    }
 
 
 def _missing_names_requested(missing: Sequence[Any], requested: str) -> bool:
@@ -321,10 +366,27 @@ def normalize_treasury_envelope(envelope: Mapping[str, Any]) -> TreasurySeries:
             {"country_entity": source.get("country_entity")},
         )
 
-    qualifiers = _validate_qualifiers(_mapping(source.get("qualifiers"), "Treasury qualifiers"))
+    qualifiers = _complete_qualifier_echo(source, "qualifiers", "declared")
     request = _mapping(source.get("request"), "Treasury request")
     result = _mapping(source.get("result"), "Treasury result")
-    _qualifier_agreement(qualifiers, request, result)
+    requested_qualifiers = _complete_qualifier_echo(
+        request, "requested_qualifiers", "requested"
+    )
+    _qualifiers_must_match(qualifiers, requested_qualifiers, "requested")
+    requested_maturity = _typed_maturity(
+        request.get("requested_maturity"),
+        "requested",
+        expected_evidence_kind="classifier_typed_request",
+    )
+    if requested_maturity["duration"] != qualifiers["maturity_duration"]:
+        raise DataGateError(
+            "treasury_maturity_mismatch",
+            "Treasury requested maturity duration conflicts with requested qualifiers.",
+            {
+                "qualifier_duration": qualifiers["maturity_duration"],
+                "typed_duration": requested_maturity["duration"],
+            },
+        )
     requested_range = _requested_range(request)
     if result.get("property") != "Treasury":
         raise DataGateError(
@@ -338,9 +400,6 @@ def normalize_treasury_envelope(envelope: Mapping[str, Any]) -> TreasurySeries:
             "Wolfram Treasury yields must use the Percent unit.",
             {"unit": result.get("unit")},
         )
-    maturity_years = _finite_number(
-        result.get("maturity_years"), "Treasury maturity_years", positive=True
-    )
     _required_text(qualifiers, "maturity_duration")
     retrieved_at = _required_text(source, "retrieved_at")
     sources = _sources(source.get("sources"))
@@ -363,6 +422,39 @@ def normalize_treasury_envelope(envelope: Mapping[str, Any]) -> TreasurySeries:
             "Wolfram Treasury returned no observations.",
             {"missing": list(missing)},
         )
+    observed_qualifiers = _complete_qualifier_echo(
+        result, "observed_qualifiers", "provider-observed"
+    )
+    _qualifiers_must_match(qualifiers, observed_qualifiers, "provider_observed")
+    observed_maturity = _typed_maturity(
+        result.get("observed_maturity"),
+        "provider-observed",
+        expected_evidence_kind="provider_observed_typed",
+    )
+    try:
+        maturity_years = _finite_number(
+            result.get("maturity_years"), "Treasury maturity_years", positive=True
+        )
+    except DataGateError as exc:
+        raise DataGateError(
+            "treasury_maturity_mismatch",
+            "Treasury result requires provider-derived typed numeric maturity years.",
+            {"maturity_years": result.get("maturity_years")},
+        ) from exc
+    if (
+        observed_maturity["duration"] != qualifiers["maturity_duration"]
+        or observed_maturity["years"] != requested_maturity["years"]
+        or maturity_years != observed_maturity["years"]
+    ):
+        raise DataGateError(
+            "treasury_maturity_mismatch",
+            "Treasury requested and provider-observed typed maturities disagree.",
+            {
+                "requested_maturity": requested_maturity,
+                "observed_maturity": observed_maturity,
+                "maturity_years": maturity_years,
+            },
+        )
     minimum = 1 if evidence_kind == "us_treasury_current" else 2
     if len(series) < minimum:
         raise DataGateError(
@@ -383,6 +475,10 @@ def normalize_treasury_envelope(envelope: Mapping[str, Any]) -> TreasurySeries:
         "maturity_years": maturity_years,
         "unit": result["unit"],
         "qualifiers": qualifiers,
+        "requested_qualifiers": requested_qualifiers,
+        "observed_qualifiers": observed_qualifiers,
+        "requested_maturity": requested_maturity,
+        "observed_maturity": observed_maturity,
         "sources": sources,
         "source_names": [str(item["name"]) for item in sources],
         "observation_count": len(series),
@@ -664,16 +760,31 @@ def align_periodic_risk_free(
     periodic = np.power(1.0 + annual_decimal, 1.0 / periods_per_year) - 1.0
     periodic.name = "risk_free_periodic"
     direct_observation_count = int((source_ages == 0).sum())
-    source_date_receipt = [
+    aligned_observation_receipt = [
         {
             "return_date": return_date.isoformat(),
             "source_date": source_date.isoformat(),
             "source_age_days": int(source_age),
+            "raw_annual_percent": float(raw_annual_percent),
+            "periodic_rate": float(periodic_rate),
         }
-        for return_date, source_date, source_age in zip(
-            aligned_index, source_dates, source_ages, strict=True
+        for return_date, source_date, source_age, raw_annual_percent, periodic_rate in zip(
+            aligned_index,
+            source_dates,
+            source_ages,
+            aligned_annual_percent.to_numpy(),
+            periodic.to_numpy(),
+            strict=True,
         )
     ]
+    upstream_provenance = {
+        "provider": annual_percent.receipt["provider"],
+        "country_entity": annual_percent.receipt["country_entity"],
+        "property": annual_percent.receipt["property"],
+        "maturity_years": annual_percent.maturity_years,
+        "qualifiers": qualifiers,
+        "sources": list(annual_percent.receipt["sources"]),
+    }
     return RiskFreeResult(
         series=periodic,
         receipt={
@@ -684,7 +795,22 @@ def align_periodic_risk_free(
             "aligned_last_date": aligned_index.max().isoformat(),
             "direct_observation_count": direct_observation_count,
             "filled_observation_count": len(aligned_index) - direct_observation_count,
-            "source_dates": source_date_receipt,
+            "aligned_observations": aligned_observation_receipt,
+            "source_dates": [
+                {
+                    "return_date": item["return_date"],
+                    "source_date": item["source_date"],
+                    "source_age_days": item["source_age_days"],
+                }
+                for item in aligned_observation_receipt
+            ],
+            "unit": annual_percent.receipt["unit"],
+            "retrieved_at": annual_percent.receipt["retrieved_at"],
+            "requested_range": dict(annual_percent.receipt["requested_range"]),
+            "observed_range": dict(annual_percent.receipt["observed_range"]),
+            "evidence_kind": annual_percent.receipt["evidence_kind"],
+            "missing": list(annual_percent.receipt["missing"]),
+            "upstream_provenance": upstream_provenance,
             "qualifiers": qualifiers,
             "source_names": list(annual_percent.receipt["source_names"]),
             "note": (
