@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import sys
 import tempfile
 import unittest
@@ -21,6 +22,10 @@ from advisor_data.evidence_workspace import (  # noqa: E402
 from advisor_data.market_data import MarketBundle, download_market_bundle  # noqa: E402
 from tests.test_alpaca import bar, crypto_envelope, stock_envelope  # noqa: E402
 from tests.test_wolfram import financial_envelope, observation  # noqa: E402
+from tests.test_wolfram_fx import (  # noqa: E402
+    fx_observation,
+    wolfram_fx_envelope,
+)
 
 
 INDEX = pd.to_datetime(
@@ -64,6 +69,101 @@ def yahoo_fx(currency: str, **_: object) -> tuple[pd.Series, dict[str, str]]:
 
 
 class EvidenceWorkspaceTests(unittest.TestCase):
+    def _workspace_with_failed_eur_fx(self) -> dict[str, object]:
+        def failed_fx(**_: object):
+            raise DataGateError(
+                "fx_history_unavailable",
+                "Yahoo EUR FX failed.",
+                {"stage": "fx_history", "currency": "EUR"},
+            )
+
+        return prepare_yahoo_workspace(
+            ["SAP.DE"],
+            "2026-01-01",
+            "2026-02-01",
+            "USD",
+            market_loader=lambda **_: yahoo_bundle("SAP.DE", [200.0, 202.0], currency="EUR"),
+            base_fx_loader=failed_fx,
+        )
+
+    def _eur_fx_envelope(self, workspace: dict[str, object], *, inverse: bool = False):
+        envelope = wolfram_fx_envelope(
+            currency="EUR",
+            base_currency="USD" if inverse else "EUR",
+            quote_currency="EUR" if inverse else "USD",
+            symbol="USD/EUR" if inverse else "EUR/USD",
+            unit_numerator="EUR" if inverse else "USD",
+            unit_denominator="USD" if inverse else "EUR",
+            observations=[
+                fx_observation("2026-01-05", 1.0 / 1.15 if inverse else 1.15),
+                fx_observation("2026-01-30", 1.0 / 1.16 if inverse else 1.16),
+            ],
+            start="2026-01-01",
+            end="2026-02-01",
+        )
+        envelope["primary_failure"] = copy.deepcopy(workspace["fx_failures"]["EUR"]) | {
+            "provider": "yahoo"
+        }
+        return envelope
+
+    def test_complete_uses_wolfram_for_failed_eur_fx_leg(self) -> None:
+        workspace = self._workspace_with_failed_eur_fx()
+        fx_envelope = self._eur_fx_envelope(workspace)
+
+        bundle = complete_market_bundle(workspace, [], fx_envelopes=[fx_envelope])
+
+        self.assertEqual(bundle.fx_prices["EUR"].name, "EUR/USD")
+        self.assertAlmostEqual(float(bundle.fx_prices["EUR"].iloc[0]), 1.15)
+        self.assertEqual(bundle.receipt["fx_providers"], {"EUR": "wolfram"})
+        self.assertEqual(
+            bundle.receipt["fx_receipts"]["EUR"]["primary_failure"]["code"],
+            "fx_history_unavailable",
+        )
+
+    def test_complete_accepts_inverse_wolfram_fx_without_splicing_yahoo_rows(self) -> None:
+        workspace = self._workspace_with_failed_eur_fx()
+
+        bundle = complete_market_bundle(
+            workspace,
+            [],
+            fx_envelopes=[self._eur_fx_envelope(workspace, inverse=True)],
+        )
+
+        self.assertEqual(bundle.fx_prices["EUR"].name, "USD/EUR")
+        self.assertEqual(len(bundle.fx_prices["EUR"]), 2)
+        self.assertAlmostEqual(float(bundle.fx_prices["EUR"].iloc[0]), 1.15)
+        self.assertTrue(bundle.receipt["fx_receipts"]["EUR"]["inversion_applied"])
+
+    def test_duplicate_and_unrequested_wolfram_fx_inputs_are_rejected(self) -> None:
+        workspace = self._workspace_with_failed_eur_fx()
+        envelope = self._eur_fx_envelope(workspace)
+        with self.assertRaisesRegex(DataGateError, "Duplicate Wolfram FX inputs"):
+            complete_market_bundle(workspace, [], fx_envelopes=[envelope, envelope])
+
+        yahoo_complete = prepare_yahoo_workspace(
+            ["SAP.DE"],
+            "2026-01-01",
+            "2026-02-01",
+            "USD",
+            market_loader=lambda **_: yahoo_bundle("SAP.DE", [200.0, 202.0], currency="EUR"),
+            base_fx_loader=yahoo_fx,
+        )
+        with self.assertRaisesRegex(DataGateError, "unrequested currency EUR"):
+            complete_market_bundle(yahoo_complete, [], fx_envelopes=[envelope])
+
+    def test_unknown_fx_provider_and_mismatched_workspace_failure_are_rejected(self) -> None:
+        workspace = self._workspace_with_failed_eur_fx()
+        unknown = self._eur_fx_envelope(workspace)
+        unknown["provider"] = "unvalidated"
+        with self.assertRaisesRegex(DataGateError, "fallback_not_supported"):
+            complete_market_bundle(workspace, [], fx_envelopes=[unknown])
+
+        mismatch = self._eur_fx_envelope(workspace)
+        mismatch["primary_failure"]["message"] = "Different message is preserved only remotely."
+        mismatch["primary_failure"]["details"]["attempt"] = "different"
+        with self.assertRaisesRegex(DataGateError, "evidence_workspace_invalid"):
+            complete_market_bundle(workspace, [], fx_envelopes=[mismatch])
+
     def test_non_price_yahoo_failure_is_not_marked_fallback_required(self) -> None:
         with self.assertRaisesRegex(DataGateError, "currency_unavailable"):
             prepare_yahoo_workspace(

@@ -24,6 +24,7 @@ from .market_data import (
     download_market_bundle,
 )
 from .wolfram import normalize_wolfram_envelope
+from .wolfram_fx import normalize_wolfram_fx_envelope
 
 
 WORKSPACE_SCHEMA_VERSION = 1
@@ -434,7 +435,9 @@ def _envelope_provider(envelope: Mapping[str, Any]) -> str:
 def complete_market_bundle(
     workspace: Mapping[str, Any],
     envelopes: Sequence[Mapping[str, Any]],
+    fx_envelopes: Sequence[Mapping[str, Any]] = (),
     normalizers: Mapping[str, Callable[..., Any]] | None = None,
+    fx_normalizer: Callable[..., Any] | None = None,
 ) -> MarketBundle:
     """Merge Yahoo evidence with one validated provider fallback per failed symbol."""
 
@@ -559,14 +562,87 @@ def complete_market_bundle(
         str(currency).upper(): _deserialize_series(payload, str(currency).upper())
         for currency, payload in workspace.get("fx_prices", {}).items()
     }
-    missing_fx = sorted(_required_fx(currencies, str(workspace.get("base_currency"))) - set(fx_prices))
+    required_fx = _required_fx(currencies, str(workspace.get("base_currency")))
+    unresolved_fx = required_fx - set(fx_prices)
+    active_fx_normalizer = fx_normalizer or normalize_wolfram_fx_envelope
+    fx_inputs_by_currency: dict[str, Mapping[str, Any]] = {}
+    for envelope in fx_envelopes:
+        if not isinstance(envelope, Mapping):
+            raise DataGateError(
+                "wolfram_fx_schema_error",
+                "Wolfram FX input must be an object.",
+            )
+        provider = str(envelope.get("provider") or "").strip().lower()
+        if provider != "wolfram" or envelope.get("evidence_kind") != "fx_history":
+            raise DataGateError(
+                "fallback_not_supported",
+                "Only validated Wolfram FX evidence can complete a Yahoo FX failure.",
+                {"provider": provider or None},
+            )
+        try:
+            currency, scale, _ = _currency_spec(envelope.get("currency"))
+        except DataGateError as exc:
+            raise DataGateError(
+                "wolfram_fx_schema_error",
+                "Wolfram FX input declares an invalid currency.",
+            ) from exc
+        if scale != 1.0 or currency not in unresolved_fx:
+            raise DataGateError(
+                "evidence_workspace_invalid",
+                f"Wolfram FX input for unrequested currency {currency} was supplied.",
+                {
+                    "currency": currency,
+                    "required_unresolved_currencies": sorted(unresolved_fx),
+                },
+            )
+        if currency in fx_inputs_by_currency:
+            raise DataGateError(
+                "evidence_workspace_invalid",
+                f"Duplicate Wolfram FX inputs were supplied for {currency}.",
+            )
+        fx_inputs_by_currency[currency] = envelope
+
+    fx_receipts = {
+        str(currency).upper(): dict(receipt)
+        for currency, receipt in workspace.get("fx_receipts", {}).items()
+        if isinstance(receipt, Mapping)
+    }
+    fx_providers = {currency: "yahoo" for currency in required_fx & set(fx_prices)}
+    fx_failures = workspace.get("fx_failures", {})
+    for currency, envelope in fx_inputs_by_currency.items():
+        history = active_fx_normalizer(
+            envelope,
+            start=str(workspace.get("start")),
+            end=workspace.get("end"),
+        )
+        if history.currency != currency:
+            raise DataGateError(
+                "wolfram_fx_pair_mismatch",
+                "Normalized Wolfram FX currency conflicts with the workspace requirement.",
+                {"workspace_currency": currency, "normalized_currency": history.currency},
+            )
+        failure = fx_failures.get(currency) if isinstance(fx_failures, Mapping) else None
+        if not isinstance(failure, Mapping) or (
+            history.receipt["primary_failure"].get("code") != failure.get("code")
+            or history.receipt["primary_failure"].get("details") != failure.get("details")
+        ):
+            raise DataGateError(
+                "evidence_workspace_invalid",
+                "Wolfram FX input does not preserve the workspace Yahoo failure.",
+                {"currency": currency},
+            )
+        fx_prices[currency] = history.series
+        fx_receipts[currency] = dict(history.receipt)
+        fx_providers[currency] = "wolfram"
+
+    missing_fx = sorted(required_fx - set(fx_prices))
     if missing_fx:
         raise DataGateError(
             "fx_history_unavailable",
-            "Required Yahoo FX histories are unavailable for the mixed-provider bundle.",
+            "Required FX histories are unavailable for the mixed-provider bundle.",
             {
                 "missing_currencies": missing_fx,
-                "fx_failures": workspace.get("fx_failures", {}),
+                "fx_failures": fx_failures,
             },
         )
 
@@ -579,7 +655,8 @@ def complete_market_bundle(
             "source": "mixed evidence workspace",
             "providers": providers,
             "asset_receipts": receipts,
-            "fx_receipts": workspace.get("fx_receipts", {}),
+            "fx_providers": dict(sorted(fx_providers.items())),
+            "fx_receipts": dict(sorted(fx_receipts.items())),
             "start": workspace.get("start"),
             "end": workspace.get("end"),
             "base_currency": workspace.get("base_currency"),
