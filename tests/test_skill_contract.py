@@ -23,7 +23,35 @@ class SkillContractTests(unittest.TestCase):
         )
         self.assertIn("structured LLM eligibility judgment", text)
         self.assertIn("Select exactly one final validated price provider per asset", text)
-        self.assertIn("Yahoo remains mandatory for currency metadata and FX", text)
+        self.assertIn("Yahoo remains mandatory for asset currency metadata", text)
+        self.assertIn("failed Yahoo FX legs", text)
+        self.assertIn("--wolfram-fx-input", text)
+
+    def test_wolfram_fx_and_tiered_treasury_contracts_are_explicit(self) -> None:
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        contract = (ROOT / "references" / "data-contract.md").read_text(encoding="utf-8")
+        methodology = (ROOT / "references" / "methodology.md").read_text(encoding="utf-8")
+        metadata = (ROOT / "agents" / "openai.yaml").read_text(encoding="utf-8")
+
+        for token in (
+            "wolfram-fx-validate",
+            "--wolfram-fx-input",
+            "one provider per FX currency",
+            "underlying source annotation is unavailable",
+        ):
+            self.assertIn(token, skill)
+        for token in (
+            '"evidence_tier": "provider_labeled_inferred"',
+            '"evidence_confidence": "lower"',
+            '"exact_qualifier_status": "unavailable"',
+            "treasury_binding_unavailable",
+            "structured LLM semantic binding",
+        ):
+            self.assertIn(token, contract)
+        self.assertIn("lower-confidence Treasury rate input", methodology)
+        self.assertIn("no substring or regex maturity parser", methodology)
+        self.assertIn("Wolfram FX fallback", metadata)
+        self.assertIn("lower-confidence Treasury evidence", metadata)
 
     def test_wolfram_is_only_an_official_plugin_evidence_path(self) -> None:
         text = (ROOT / "SKILL.md").read_text(encoding="utf-8")

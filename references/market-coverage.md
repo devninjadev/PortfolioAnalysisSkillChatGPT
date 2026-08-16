@@ -70,3 +70,14 @@ Yahoo 검색이 현지어를 받지 못할 수 있다. 예를 들어 `삼성전�
 - 3-month **SecondaryMarket bill** evidence.
 
 These canaries all returned `Missing[NotAvailable]`. 따라서 **Treasury lane was not operational at release-verification time**. 곡선, 10년 명목, TIPS, 경매평균, 유통시장 중 어느 lane도 release 시점 작동으로 주장할 수 없고, 다른 maturity·market·security type으로 대체해서도 안 된다. 이후 실제 요청은 새 plugin 호출과 완전한 requested/provider-observed qualifier 영수증을 요구한다.
+
+## 2026-08-17 Wolfram FX and labeled Treasury canaries
+
+아래 역시 실행 시점 영수증인 **dated canary**이며 미래 가용성 약속이나 허용 목록이 아니다.
+
+- Official Wolfram plugin의 `FinancialData["KRW/USD", …]`와 `FinancialData["EUR/USD", …]`는 2026-08-03부터 2026-08-14까지 각각 10개의 날짜별 환율 관측치를 반환했다. 값은 각 통화 1단위의 USD 가치로 해석되는 direct pair였다.
+- 이 FX TimeSeries의 별도 원 공급자 source annotation과 `MetaInformation`은 제공되지 않았다. 따라서 영수증은 `Wolfram FinancialData`/official-plugin channel만 확인하고 underlying source annotation은 unavailable로 보존한다.
+- Official plugin의 labeled current U.S. Treasury yield curve는 2026-08-13 기준 3개월 3.87%, 1년 3.97%, 2년 4.15%, 5년 4.32%, 10년 4.63%, 30년 5.21%를 표시했다. 같은 만기의 exact structured qualifier query가 `Missing[NotAvailable]`였으므로 이 결과는 `provider_labeled_inferred`, not `provider_confirmed`, 로만 사용할 수 있다.
+- 만기별 historical query는 새 호출에서 날짜별 관측치를 실제로 반환하고 input interpretation이 요청 만기를 명시할 때만 lower-confidence history가 될 수 있다. 이번 canary에서 재현되지 않은 history는 가용하다고 주장하지 않는다.
+
+이 lower tier는 웹페이지 스크래핑, OCR, nearby maturity 대체가 아니다. official plugin이 반환한 명시적 label/input interpretation, 날짜, Percent 값, 실패한 exact query를 함께 보존하고 모든 의존 계산에 lower confidence를 전파하는 제한적 증거 경로다.

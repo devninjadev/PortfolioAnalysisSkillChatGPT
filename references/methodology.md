@@ -52,15 +52,15 @@ Yahoo 값이 비어 있거나 조회가 실패하면 웹 검색으로 후보 출
 
 ### 4. 가격과 뉴스
 
-“실제로 주가가 어땠는가”는 Yahoo 조정 가격과 명시된 기간·통화 기준으로 먼저 계산한다. Yahoo가 실패하면 의미상 자격이 있는 미국 주식과 크립토에 한해 Alpaca를 먼저 호출한다. 미국 주식 원시 bar는 선·역분할 및 현금배당을 안전하게 조정한 뒤에만 수익률에 넣고, 크립토 bar는 공급자 심볼·기간·통화를 확인한다. Alpaca가 대상이 아니거나 검증에 실패하면 exact Financial identity가 확인된 경우에만 official Wolfram plugin 구조화 결과를 쓴다. Wolfram에서 최근 가격은 검증된 recent-price property를 쓸 수 있지만, 누적 총수익률·MPT·그 밖의 수익률 계산은 오직 `AdjustedClose`로만 한다. `Price`, `LatestTrade`, `Close`, `RawClose`, 렌더링 이미지, 직접 HTTP/SDK/MCP/스크래핑/API 키 경로는 그 대체가 될 수 없다. Alpaca와 Wolfram 모두 Yahoo의 통화 메타데이터나 FX를 대신하지 않는다.
+“실제로 주가가 어땠는가”는 Yahoo 조정 가격과 명시된 기간·통화 기준으로 먼저 계산한다. Yahoo가 실패하면 의미상 자격이 있는 미국 주식과 크립토에 한해 Alpaca를 먼저 호출한다. 미국 주식 원시 bar는 선·역분할 및 현금배당을 안전하게 조정한 뒤에만 수익률에 넣고, 크립토 bar는 공급자 심볼·기간·통화를 확인한다. Alpaca가 대상이 아니거나 검증에 실패하면 exact Financial identity가 확인된 경우에만 official Wolfram plugin 구조화 결과를 쓴다. Wolfram에서 최근 가격은 검증된 recent-price property를 쓸 수 있지만, 누적 총수익률·MPT·그 밖의 수익률 계산은 오직 `AdjustedClose`로만 한다. `Price`, `LatestTrade`, `Close`, `RawClose`, 렌더링 이미지, 직접 HTTP/SDK/MCP/스크래핑/API 키 경로는 그 대체가 될 수 없다. Alpaca와 Wolfram 자산 가격 폴백 모두 Yahoo의 통화 메타데이터를 대신하지 않는다. FX는 Yahoo를 먼저 쓰고 실패한 통화 다리만 official Wolfram `FinancialData`의 검증된 direct 또는 inverse pair로 대체한다.
 
 “어떤 소식이 있었나”는 Yahoo를 후보 발견에만 사용하고, Yahoo 뉴스가 실패하면 웹 검색으로 후보를 찾는다. 어느 경로든 검색 결과나 제목에서 끝내지 않고 원문 기사, 거래소 공시, 회사 IR, 규제기관 문서를 연다. 열린 일반 출처는 `publisher_verified`, 열린 1차 출처는 `primary_verified`로 구분한다. 가격 변동과 사건의 시간적 근접성만으로 인과관계를 단정하지 않는다. 확인 가능한 시장 보도는 `동시에 보도됨`, 근거가 약한 설명은 `가능한 해석`으로 표현한다.
 
 ### 5. 포트폴리오 후보
 
-기본 분석은 주간 수익률, 최소 104개의 공통 관측치, 사용자가 선택한 기준 통화를 사용한다. 서로 다른 통화의 자산을 섞으면 Yahoo가 제공하는 `통화USD=X` 환율 다리로 각 통화 1단위의 USD 가치를 구한 뒤 같은 기준 통화의 가격열을 만든다. 직접 환율이 없으면 `통화=X` 역수를 시도한다. 자산 가격은 임의로 전진 채움하지 않는다. 환율은 거래일 불일치 보정을 위해 최대 3일까지만 전진 채운다.
+기본 분석은 주간 수익률, 최소 104개의 공통 관측치, 사용자가 선택한 기준 통화를 사용한다. 서로 다른 통화의 자산을 섞으면 Yahoo가 제공하는 `통화USD=X` 환율 다리로 각 통화 1단위의 USD 가치를 구한 뒤 같은 기준 통화의 가격열을 만든다. 직접 환율이 없으면 `통화=X` 역수를 시도한다. 두 Yahoo 방향이 모두 실패하면 해당 통화만 official Wolfram plugin의 `CCY/USD`를 시도하고, 필요하면 `USD/CCY`를 한 번 역수화한다. Yahoo와 Wolfram 관측치를 한 통화 열 안에서 섞지 않으며 통화별 최종 공급자를 영수증에 남긴다. Wolfram이 별도 원 공급자 주석을 주지 않으면 그 상태를 unavailable로 보존한다. 자산 가격은 임의로 전진 채움하지 않는다. 환율은 공급자와 무관하게 거래일 불일치 보정을 위해 최대 3일까지만 전진 채운다.
 
-여러 종목 중 일부 Yahoo **가격 이력만** 실패하면 성공분을 버리지 않는다. 실패는 stage-aware 영수증을 남기며, `network_error`는 `asset_price` stage로 확인된 경우에만 가격 폴백이다. generic network, `currency_metadata`, `fx_history`, 다른 비가격 실패는 대안 경로로 보내지 않는다. 가격 실패 심볼도 Yahoo currency metadata를 가격과 독립적으로 다시 확인하고 자산/기준 통화 FX를 미리 보존한다. `prepare-portfolio` 워크스페이스에 종목별 Yahoo 가격·통화·FX·오류를 보존한 뒤, 실패 심볼은 의미상 자격이 있으면 Alpaca를 먼저, 그 외 또는 Alpaca 게이트 실패 뒤에는 exact Financial entity가 확인될 때만 Wolfram으로 채워 `complete-portfolio`를 실행한다. 폴백 정규화 통화는 Yahoo 정규화 통화와 같아야 하며 계산은 Yahoo 원 통화 단위를 권위로 쓴다. 자산마다 최종 가격 공급자는 정확히 하나이며, 결과에는 각 자산별 `yahoo`, `alpaca`, 또는 `wolfram`을 명시한다. 필수 종목이나 Yahoo FX가 하나라도 해결되지 않으면 종목을 조용히 빼지 않고 모든 비중 출력을 막는다.
+여러 종목 중 일부 Yahoo **가격 이력만** 실패하면 성공분을 버리지 않는다. 실패는 stage-aware 영수증을 남기며, `network_error`는 `asset_price` stage로 확인된 경우에만 가격 폴백이다. generic network, `currency_metadata`, 다른 비가격 실패는 자산 대안 경로로 보내지 않는다. `fx_history` 실패는 별도 통화 폴백 요구로 보존한다. 가격 실패 심볼도 Yahoo currency metadata를 가격과 독립적으로 다시 확인하고 자산/기준 통화 FX를 먼저 시도한다. `prepare-portfolio` 워크스페이스에 종목별 Yahoo 가격·통화·FX·오류를 보존한 뒤, 실패 심볼은 의미상 자격이 있으면 Alpaca를 먼저, 그 외 또는 Alpaca 게이트 실패 뒤에는 exact Financial entity가 확인될 때만 Wolfram으로 채운다. 실패 FX 통화는 별도 Wolfram FX 봉투로 채워 `complete-portfolio`를 실행한다. 폴백 정규화 통화는 Yahoo 정규화 통화와 같아야 하며 계산은 Yahoo 원 통화 단위를 권위로 쓴다. 자산마다 최종 가격 공급자는 정확히 하나이고 통화마다 최종 FX 공급자도 정확히 하나다. 필수 종목이나 FX가 하나라도 해결되지 않으면 종목을 조용히 빼지 않고 모든 비중 출력을 막는다.
 
 제시 가능한 결과는 다음 두 개다.
 
@@ -80,6 +80,8 @@ Formula: `(1 + annual_percent / 100)^(1 / periods_per_year) - 1`.
 Alignment: 마지막으로 검증된 Treasury 관측치는 미래를 보지 않고 at most three calendar days만 다음 수익률 날짜로 이어질 수 있다.
 
 Failure: 정확한 시리즈, source annotation, 또는 정렬이 없으면 의존 Sharpe, Sortino, and alpha fields remain `null` with `risk_free_rate_unavailable`.
+
+Evidence tiers: exact provider qualifier and typed maturity echoes are `provider_confirmed`. If that query is unavailable but the official plugin explicitly labels or interprets the requested maturity and returns dated Percent observations, a structured LLM semantic binding may produce `provider_labeled_inferred`. Deterministic code uses no substring or regex maturity parser. A lower-confidence Treasury rate input may be used numerically, but curves, interpolation, aligned risk-free rows, Sharpe, Sortino, alpha, backtests, and scenarios must inherit and display `evidence_confidence: lower`, the exact-query failure, and the dependency warning.
 
 각 정렬 행에는 공급자 원값 `raw_annual_percent`와 로컬 계산값 `periodic_rate`를 함께 남긴다. 영수증은 `unit`, `retrieved_at`, requested/observed range, `evidence_kind`, missing markers, 그리고 원 Treasury provider/entity/property/maturity/qualifier/source annotation을 담은 `upstream_provenance`를 보존한다. 이 두 값을 함께 남겨야 공급자 관측과 분석 변환을 사후에 분리 검증할 수 있다.
 

@@ -57,7 +57,7 @@ Yahoo news is discovery-only. Open the linked publisher or official filing befor
 
 Yahoo remains the primary provider. After a Yahoo price data-source failure, classify fallback eligibility semantically from the complete user request and structured Yahoo candidate metadata. Existing eligible U.S. equity and crypto paths try Alpaca first. If Alpaca is ineligible, unavailable, incomplete, or fails its evidence gates, use the official Wolfram plugin when it is connected and an exact Financial entity can be confirmed.
 
-Do not call Alpaca, Wolfram, or web search merely to duplicate a successful Yahoo result. Only a failure proven to originate in Yahoo's asset-price stage enters the fallback lane: the price-specific `price_history_unavailable` code is eligible, and a production `network_error` is eligible only when its structured receipt says `stage: asset_price`. Generic or unscoped network errors, `currency_unavailable`, FX, schema, and every other non-price failure stop instead of becoming fallback-required. For an asset-price-stage failure, independently retrieve and persist Yahoo currency metadata plus every required Yahoo asset/base FX leg before completing a fallback. Yahoo remains mandatory for currency metadata and FX, and it is the currency authority even when a final asset price provider is Alpaca or Wolfram. The fallback's normalized currency must match Yahoo, while calculations retain Yahoo's original currency unit. Select exactly one final validated price provider per asset; do not splice providers within an asset history.
+Do not call Alpaca, Wolfram, or web search merely to duplicate a successful Yahoo result. Only a failure proven to originate in Yahoo's asset-price stage enters the asset fallback lane: the price-specific `price_history_unavailable` code is eligible, and a production `network_error` is eligible only when its structured receipt says `stage: asset_price`. Generic or unscoped network errors, `currency_unavailable`, schema, and other non-price failures remain blocking. Yahoo remains mandatory for asset currency metadata and is the currency authority even when a final asset price provider is Alpaca or Wolfram. Required FX is tried through Yahoo first; only failed Yahoo FX legs may enter the separate official-Wolfram-plugin FX fallback below. The asset fallback's normalized currency must match Yahoo, while calculations retain Yahoo's original currency unit. Select exactly one final validated price provider per asset and one provider per FX currency; do not splice providers within either series.
 
 ### Alpaca fallback for eligible historical prices
 
@@ -80,7 +80,7 @@ The only eligible classes are `us_equity` and `crypto`. `unsupported_market` and
 - For `us_equity`, call Alpaca's exact asset lookup, stock bars, and corporate actions for the requested range. Save the structured responses in the envelope defined by [references/data-contract.md](references/data-contract.md). Raw stock bars cannot enter returns before split and cash-distribution adjustment.
 - For `crypto`, call Alpaca crypto bars and preserve the exact slash-delimited provider symbol. Crypto requires no corporate-action response.
 - For a Korean equity or any other unsupported market, do not call Alpaca and do not remove or replace the failed asset.
-- Alpaca does not replace Yahoo currency metadata or FX. Missing required FX still blocks cross-currency results.
+- Alpaca does not replace Yahoo currency metadata. Required FX uses Yahoo first and may use the separately validated Wolfram FX fallback only after Yahoo fails.
 
 For a single recent-price validation, save the envelope and run:
 
@@ -116,16 +116,33 @@ python scripts/advisor_data_cli.py wolfram-validate \
 
 If the official Wolfram plugin is not connected or no exact Financial entity, `AdjustedClose`, source annotation, or requested coverage can be confirmed, report `wolfram_plugin_unavailable`, `wolfram_entity_mismatch`, `wolfram_property_unavailable`, `wolfram_source_unavailable`, or the returned data-gate error as applicable. Do not claim that Wolfram ran and do not replace the failed asset.
 
+### Wolfram FX fallback after Yahoo FX failure
+
+Yahoo remains the primary FX provider. For each currency in `fallback_required_fx`, use the official Wolfram plugin to request a dated `FinancialData` pair only after preserving the matching Yahoo `fx_history_unavailable` receipt. Accept `CCY/USD` directly or `USD/CCY` with one disclosed inversion. The structured unit must agree with the pair and the normalized result must always mean USD per one unit of `CCY`. Do not combine Yahoo and Wolfram rows inside one currency series: one provider per FX currency is mandatory.
+
+The probed Wolfram FX time series identifies `Wolfram FinancialData` and the official plugin channel, but its underlying source annotation is unavailable. Preserve that exact limitation as `underlying source annotation is unavailable`; never invent an underlying vendor. Validate before completion:
+
+```bash
+python scripts/advisor_data_cli.py wolfram-fx-validate \
+  --input /tmp/KRW-wolfram-fx.json \
+  --start 2021-01-01 \
+  --end 2026-08-15
+```
+
+Reject unrelated pairs, conflicting orientation/unit metadata, non-positive or non-finite values, conflicting duplicate timestamps, range mismatch, incomplete coverage, missing official-plugin provenance, or an FX envelope that does not preserve the workspace's Yahoo failure. The CLI validates official-plugin evidence but never calls Wolfram, HTTP, a public webpage, or a Python SDK.
+
 ### U.S. Treasury evidence through the official Wolfram plugin
 
-For requested U.S. Treasury levels, histories, curves, or backtest risk-free inputs, have the LLM emit the structured Treasury envelope in [references/data-contract.md](references/data-contract.md). It must state `UnitedStates`, a complete `requested_qualifiers` echo, typed numeric `requested_maturity`, exact requested range, and structured observations or `Missing`. A successful result must independently return a complete `observed_qualifiers` echo and provider-derived typed numeric `observed_maturity`, plus unit, source annotations, and retrieval time. All qualifier and numeric maturity evidence must agree exactly; never derive maturity years by parsing `10Year` text. Run the deterministic validator before using it:
+For requested U.S. Treasury levels, histories, curves, or backtest risk-free inputs, have the LLM emit the structured Treasury envelope in [references/data-contract.md](references/data-contract.md). It must state `UnitedStates`, a complete `requested_qualifiers` echo, typed numeric `requested_maturity`, exact requested range, and structured observations or `Missing`. Prefer `provider_confirmed`: a successful exact result independently returns a complete `observed_qualifiers` echo and provider-derived typed numeric `observed_maturity`, plus unit, source annotations, and retrieval time. All qualifier and numeric maturity evidence must agree exactly; never derive maturity years by parsing `10Year` text.
+
+If the exact structured query is unavailable but the official plugin explicitly displays or interprets the requested maturity and returns dated `Percent` observations, a structured LLM semantic binding may emit `provider_labeled_inferred`. It must preserve the exact-query `Missing` receipt, explicit label or input interpretation, observation date/range, typed requested and bound maturity, and an empty conflict list. The deterministic validator does not parse prose. This tier is usable for curves, spreads, historical risk-free conversion, backtests, and scenarios, but every dependent receipt must retain `evidence_confidence: lower`, `exact_qualifier_status: unavailable`, and the lower-confidence dependency warning. An unlabeled number, missing date, maturity conflict, non-Percent unit, scraped webpage, rendered image, or OCR result remains unusable. Run the deterministic validator before either tier is used:
 
 ```bash
 python scripts/advisor_data_cli.py treasury-validate \
   --input /tmp/us-3-month-treasury.json
 ```
 
-The validator preserves `Missing`; never substitute a nearby maturity. Keep observed yields and optional interpolated curve calculations separate: an interpolation is a labelled calculation, never an observed Treasury fact. For historical backtest risk-free rates, the default is the verified 3-month constant-maturity daily U.S. Treasury proxy. If the exact series, a source annotation, or a timely aligned observation is unavailable, retain `null` and `risk_free_rate_unavailable` for dependent metrics instead of selecting another rate.
+The validator preserves `Missing`; never substitute a nearby maturity. Keep observed yields and optional interpolated curve calculations separate: an interpolation is a labelled calculation, never an observed Treasury fact. For historical backtest risk-free rates, the default request is the 3-month constant-maturity daily U.S. Treasury proxy. Use a validated exact or explicitly lower-confidence historical series and disclose its tier. If neither tier has adequate maturity/date/unit binding or timely alignment, retain `null` and `risk_free_rate_unavailable` for dependent metrics instead of selecting another rate.
 
 ### Web fallback for fundamentals, valuation, and news
 
@@ -165,12 +182,13 @@ For every symbol in `fallback_required_symbols`, use structured LLM eligibility 
 python scripts/advisor_data_cli.py complete-portfolio \
   --workspace /tmp/advisor-evidence.json \
   --wolfram-input /tmp/AAPL-wolfram.json \
+  --wolfram-fx-input /tmp/KRW-wolfram-fx.json \
   --frequency weekly \
   --min-observations 104 \
   --max-weight 0.70
 ```
 
-The completion command accepts `--alpaca-input` and `--wolfram-input`, but exactly one final provider is allowed for each asset. It may mix Yahoo, Alpaca, and Wolfram histories across different assets, never within one asset. It must receive evidence for every required asset and every Yahoo FX leg; it never silently drops a failed asset. If any gate fails, do not fabricate MPT, correlations, equal-weight fallbacks, or substitute tickers.
+The completion command accepts asset inputs through `--alpaca-input` and `--wolfram-input`, and FX inputs separately through repeatable `--wolfram-fx-input`. Exactly one final provider is allowed for each asset and one provider per FX currency. It may mix providers across different assets or currency legs, never within one series. It must receive evidence for every required asset and every unresolved FX leg; it never silently drops a failed asset or currency. If any gate fails, do not fabricate MPT, correlations, equal-weight fallbacks, or substitute tickers.
 
 ## Render requested backtests by default
 
@@ -200,4 +218,4 @@ A requested backtest is a historical-performance presentation, not an MPT optimi
 7. Conditional portfolio candidates, sensitivity, and concentration risks.
 8. What additional user constraints or primary sources are still needed.
 
-Do not collapse company quality, current valuation, and portfolio fit into one universal score. Do not imply suitability from a backtest alone. Identify the final provider for each price series and keep Yahoo FX separate. Mention that Yahoo Finance/yfinance, Alpaca market data, and official Wolfram plugin evidence are for research and may require licensing review for redistribution or commercial use.
+Do not collapse company quality, current valuation, and portfolio fit into one universal score. Do not imply suitability from a backtest alone. Identify the final provider for each price series and each FX currency, plus every Treasury evidence tier used. Mention that Yahoo Finance/yfinance, Alpaca market data, and official Wolfram plugin evidence are for research and may require licensing review for redistribution or commercial use.
