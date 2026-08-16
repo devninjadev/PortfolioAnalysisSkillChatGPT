@@ -188,6 +188,7 @@ class CliTests(unittest.TestCase):
 
     def test_wolfram_validate_emits_normalized_receipt(self) -> None:
         envelope = financial_envelope(
+            request_end="2026-01-13",
             observations=[
                 observation("2026-01-05T00:00:00+00:00", 100.0),
                 observation("2026-01-12T00:00:00+00:00", 101.0),
@@ -204,8 +205,8 @@ class CliTests(unittest.TestCase):
                         str(input_path),
                         "--start",
                         "2026-01-01",
-                        "--end",
-                        "2026-02-01",
+                    "--end",
+                    "2026-01-13",
                     ]
                 )
 

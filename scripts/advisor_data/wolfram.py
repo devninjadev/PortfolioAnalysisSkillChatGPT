@@ -13,6 +13,20 @@ from . import DataGateError
 
 RECENT_PRICE_PROPERTIES = {"Price", "LatestTrade", "Close"}
 TOTAL_RETURN_PROPERTY = "AdjustedClose"
+HISTORY_ENDPOINT_TOLERANCE_DAYS = 7
+RECENT_PRICE_MAX_AGE_DAYS = 7
+REQUIRED_IDENTITY_FIELDS = (
+    "symbol",
+    "exchange",
+    "issuer",
+    "security_type",
+    "currency",
+)
+SUBTYPE_IDENTITY_FIELDS = ("share_class", "instrument_subtype")
+MONETARY_UNIT_CURRENCIES = {
+    "USDollars": "USD",
+    "Euros": "EUR",
+}
 
 
 @dataclass(frozen=True)
@@ -125,30 +139,287 @@ def _parse_observations(value: Any, property_name: str) -> pd.Series:
     return series
 
 
-def _coverage_status(
-    series: pd.Series,
+def _normalized_identity_value(field: str, value: str) -> str:
+    normalized = " ".join(value.split())
+    if field in {"symbol", "exchange", "currency", "provider_entity"}:
+        return normalized.upper()
+    return normalized.casefold()
+
+
+def _identity_text(identity: Mapping[str, Any], field: str, label: str) -> str:
+    value = identity.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise DataGateError(
+            "wolfram_entity_mismatch",
+            f"Wolfram {label} identity is missing {field}.",
+            {"identity": label, "field": field},
+        )
+    return value.strip()
+
+
+def _compare_identity_field(
+    field: str,
+    expected: Mapping[str, Any],
+    observed: Mapping[str, Any],
     *,
-    start: str,
-    end: str | None,
-) -> str:
-    requested_start = _utc_timestamp(start, "requested start")
-    requested_end = _utc_timestamp(end, "requested end") if end is not None else None
-    if requested_end is not None and requested_end < requested_start:
+    expected_label: str,
+    observed_label: str,
+) -> None:
+    expected_value = _identity_text(expected, field, expected_label)
+    observed_value = _identity_text(observed, field, observed_label)
+    if _normalized_identity_value(field, expected_value) != _normalized_identity_value(
+        field, observed_value
+    ):
+        raise DataGateError(
+            "wolfram_entity_mismatch",
+            f"Wolfram structured identity conflicts on {field}.",
+            {
+                "field": field,
+                expected_label: expected_value,
+                observed_label: observed_value,
+            },
+        )
+
+
+def _validate_structured_identity(
+    classification: Mapping[str, Any],
+    result: Mapping[str, Any],
+    *,
+    symbol: str,
+    provider_entity: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        yahoo_candidate = _mapping(
+            classification.get("yahoo_candidate"), "Yahoo candidate identity"
+        )
+        wolfram_observed = _mapping(
+            classification.get("wolfram_observed"), "Wolfram observed identity"
+        )
+    except DataGateError as exc:
+        raise DataGateError(
+            "wolfram_entity_mismatch",
+            "Wolfram fallback requires structured Yahoo and Wolfram identities.",
+        ) from exc
+
+    result_identity = {
+        "provider_entity": result.get("entity"),
+        "symbol": result.get("symbol"),
+        "exchange": result.get("exchange"),
+        "issuer": result.get("issuer") or result.get("company"),
+        "security_type": result.get("security_type"),
+        "share_class": result.get("share_class"),
+        "instrument_subtype": result.get("instrument_subtype"),
+        "currency": result.get("currency"),
+    }
+    for field in REQUIRED_IDENTITY_FIELDS:
+        _compare_identity_field(
+            field,
+            yahoo_candidate,
+            wolfram_observed,
+            expected_label="yahoo_candidate",
+            observed_label="wolfram_observed",
+        )
+        _compare_identity_field(
+            field,
+            wolfram_observed,
+            result_identity,
+            expected_label="wolfram_observed",
+            observed_label="result",
+        )
+
+    subtype_fields = {
+        field
+        for field in SUBTYPE_IDENTITY_FIELDS
+        if any(
+            isinstance(identity.get(field), str) and bool(identity.get(field).strip())
+            for identity in (yahoo_candidate, wolfram_observed, result_identity)
+        )
+    }
+    if not subtype_fields:
+        raise DataGateError(
+            "wolfram_entity_mismatch",
+            "Wolfram fallback identity requires share class or instrument subtype evidence.",
+        )
+    for field in sorted(subtype_fields):
+        _compare_identity_field(
+            field,
+            yahoo_candidate,
+            wolfram_observed,
+            expected_label="yahoo_candidate",
+            observed_label="wolfram_observed",
+        )
+        _compare_identity_field(
+            field,
+            wolfram_observed,
+            result_identity,
+            expected_label="wolfram_observed",
+            observed_label="result",
+        )
+
+    _compare_identity_field(
+        "provider_entity",
+        {"provider_entity": provider_entity},
+        wolfram_observed,
+        expected_label="declared",
+        observed_label="wolfram_observed",
+    )
+    _compare_identity_field(
+        "provider_entity",
+        wolfram_observed,
+        result_identity,
+        expected_label="wolfram_observed",
+        observed_label="result",
+    )
+    _compare_identity_field(
+        "symbol",
+        {"symbol": symbol},
+        yahoo_candidate,
+        expected_label="declared",
+        observed_label="yahoo_candidate",
+    )
+    return dict(yahoo_candidate), dict(wolfram_observed)
+
+
+def _monetary_unit(value: Any, currency: str) -> tuple[str, dict[str, str]]:
+    if not isinstance(value, Mapping):
+        raise DataGateError(
+            "wolfram_unit_mismatch",
+            "Wolfram monetary unit evidence must be a structured object.",
+            {"received_type": value.__class__.__name__},
+        )
+    name = value.get("name")
+    canonical_currency = value.get("canonical_currency")
+    quantity_kind = value.get("quantity_kind")
+    if (
+        not isinstance(name, str)
+        or not name.strip()
+        or not isinstance(canonical_currency, str)
+        or not canonical_currency.strip()
+        or quantity_kind != "monetary"
+    ):
+        raise DataGateError(
+            "wolfram_unit_mismatch",
+            "Wolfram monetary unit evidence is malformed.",
+            {"unit": dict(value)},
+        )
+    name = name.strip()
+    canonical_currency = canonical_currency.strip().upper()
+    mapped_currency = MONETARY_UNIT_CURRENCIES.get(name)
+    if mapped_currency is None:
+        raise DataGateError(
+            "wolfram_unit_mismatch",
+            "Wolfram monetary unit name is not recognized by the deterministic mapping.",
+            {"unit_name": name, "canonical_currency": canonical_currency},
+        )
+    if mapped_currency != canonical_currency or canonical_currency != currency.upper():
+        raise DataGateError(
+            "wolfram_unit_mismatch",
+            "Wolfram monetary unit and result currency disagree.",
+            {
+                "unit_name": name,
+                "mapped_currency": mapped_currency,
+                "canonical_currency": canonical_currency,
+                "result_currency": currency,
+            },
+        )
+    return name, {
+        "name": name,
+        "canonical_currency": canonical_currency,
+        "quantity_kind": "monetary",
+    }
+
+
+def _validated_request_range(
+    request: Mapping[str, Any], start: str, end: str | None
+) -> tuple[pd.Timestamp, pd.Timestamp | None, dict[str, str | None]]:
+    request_start = _utc_timestamp(request.get("start"), "envelope request start")
+    request_end = (
+        _utc_timestamp(request.get("end"), "envelope request end")
+        if request.get("end") is not None
+        else None
+    )
+    cli_start = _utc_timestamp(start, "requested start")
+    cli_end = _utc_timestamp(end, "requested end") if end is not None else None
+    if request_end is not None and request_end < request_start:
         raise DataGateError(
             "wolfram_schema_error",
             "Wolfram requested range ends before it starts.",
-            {"start": start, "end": end},
+            {"start": request.get("start"), "end": request.get("end")},
         )
+    if request_start != cli_start or request_end != cli_end:
+        raise DataGateError(
+            "wolfram_request_mismatch",
+            "Wolfram envelope request range does not match the CLI or workspace range.",
+            {
+                "envelope": {
+                    "start": request_start.isoformat(),
+                    "end": request_end.isoformat() if request_end is not None else None,
+                },
+                "caller": {
+                    "start": cli_start.isoformat(),
+                    "end": cli_end.isoformat() if cli_end is not None else None,
+                },
+            },
+        )
+    return request_start, request_end, {
+        "start": request_start.isoformat(),
+        "end": request_end.isoformat() if request_end is not None else None,
+    }
 
-    clipped_start = series.index.min() > requested_start
-    clipped_end = requested_end is not None and series.index.max() < requested_end
-    if clipped_start and clipped_end:
-        return "clipped_both"
-    if clipped_start:
-        return "clipped_start"
-    if clipped_end:
-        return "clipped_end"
-    return "complete"
+
+def _history_coverage_status(
+    series: pd.Series,
+    *,
+    requested_start: pd.Timestamp,
+    requested_end: pd.Timestamp | None,
+) -> tuple[str, dict[str, int]]:
+    first = series.index.min()
+    last = series.index.max()
+    start_gap = max(0, int((first.normalize() - requested_start.normalize()).days))
+    end_gap = (
+        max(0, int((requested_end.normalize() - last.normalize()).days))
+        if requested_end is not None
+        else 0
+    )
+    gaps = {"start_calendar_days": start_gap, "end_calendar_days": end_gap}
+    if start_gap > HISTORY_ENDPOINT_TOLERANCE_DAYS or end_gap > HISTORY_ENDPOINT_TOLERANCE_DAYS:
+        raise DataGateError(
+            "wolfram_history_incomplete",
+            "Wolfram AdjustedClose history is materially clipped at a requested endpoint.",
+            {
+                **gaps,
+                "endpoint_tolerance_days": HISTORY_ENDPOINT_TOLERANCE_DAYS,
+                "first_observation": first.isoformat(),
+                "last_observation": last.isoformat(),
+            },
+        )
+    return ("endpoint_tolerated" if start_gap or end_gap else "complete"), gaps
+
+
+def _validate_recent_freshness(
+    series: pd.Series,
+    requested_end: pd.Timestamp | None,
+    retrieved_at: str,
+) -> dict[str, Any]:
+    anchor = requested_end or _utc_timestamp(retrieved_at, "retrieved_at")
+    age_days = int((anchor.normalize() - series.index.max().normalize()).days)
+    if age_days < 0 or age_days > RECENT_PRICE_MAX_AGE_DAYS:
+        raise DataGateError(
+            "wolfram_recent_price_stale",
+            "Wolfram recent-price observation is outside the freshness policy.",
+            {
+                "observation_at": series.index.max().isoformat(),
+                "freshness_anchor": anchor.isoformat(),
+                "age_calendar_days": age_days,
+                "max_age_days": RECENT_PRICE_MAX_AGE_DAYS,
+            },
+        )
+    return {
+        "policy": "calendar_day_recent_price_freshness",
+        "max_age_days": RECENT_PRICE_MAX_AGE_DAYS,
+        "age_calendar_days": age_days,
+        "anchor": anchor.isoformat(),
+    }
 
 
 def _sources(value: Any) -> list[dict[str, Any]]:
@@ -212,36 +483,10 @@ def normalize_wolfram_envelope(
         source.get("classification_evidence"), "classification evidence"
     )
     result = _mapping(source.get("result"), "financial result")
-
-    if classification.get("identity_decision") != "match":
-        raise DataGateError(
-            "wolfram_entity_mismatch",
-            "Wolfram classification evidence did not confirm identity.",
-            {"identity_decision": classification.get("identity_decision")},
-        )
-    conflicts = classification.get("conflicts")
-    if not isinstance(conflicts, list) or conflicts:
-        raise DataGateError(
-            "wolfram_entity_mismatch",
-            "Wolfram classification evidence contains identity conflicts.",
-            {"conflicts": conflicts},
-        )
-
-    result_currency = _required_text(result, "currency")
-    if (
-        str(classification.get("yahoo_symbol") or "") != symbol
-        or str(classification.get("expected_provider_currency") or "") != result_currency
-    ):
-        raise DataGateError(
-            "wolfram_entity_mismatch",
-            "Wolfram classification evidence conflicts with the declared financial result.",
-            {
-                "symbol": symbol,
-                "yahoo_symbol": classification.get("yahoo_symbol"),
-                "expected_provider_currency": classification.get("expected_provider_currency"),
-                "result_currency": result_currency,
-            },
-        )
+    request = _mapping(source.get("request"), "financial request")
+    requested_start, requested_end, requested_range = _validated_request_range(
+        request, start, end
+    )
 
     if result.get("entity_type") != "Financial":
         raise DataGateError(
@@ -249,23 +494,17 @@ def normalize_wolfram_envelope(
             "Wolfram result is not a Financial entity.",
             {"entity_type": result.get("entity_type")},
         )
-    if result.get("entity") != provider_entity:
-        raise DataGateError(
-            "wolfram_entity_mismatch",
-            "Wolfram returned a different provider entity.",
-            {"provider_entity": provider_entity, "returned_entity": result.get("entity")},
-        )
-    if result.get("symbol") != symbol:
-        raise DataGateError(
-            "wolfram_entity_mismatch",
-            "Wolfram returned a different financial symbol.",
-            {"symbol": symbol, "returned_symbol": result.get("symbol")},
-        )
-
+    yahoo_candidate, wolfram_observed = _validate_structured_identity(
+        classification,
+        result,
+        symbol=symbol,
+        provider_entity=provider_entity,
+    )
+    result_currency = _required_text(result, "currency")
     exchange = _required_text(result, "exchange")
     security_type = _required_text(result, "security_type")
     currency = result_currency
-    unit = _required_text(result, "unit")
+    unit, unit_evidence = _monetary_unit(result.get("unit"), result_currency)
     retrieved_at = _required_text(source, "retrieved_at")
     sources = _sources(source.get("sources"))
 
@@ -290,7 +529,19 @@ def normalize_wolfram_envelope(
             "Wolfram recent-price evidence requires an observation.",
         )
 
-    coverage_status = _coverage_status(series, start=start, end=end)
+    if required_price_basis == "adjusted_total_return":
+        coverage_status, coverage_gaps = _history_coverage_status(
+            series,
+            requested_start=requested_start,
+            requested_end=requested_end,
+        )
+        freshness_policy = None
+    else:
+        coverage_status = "recent_price_freshness_validated"
+        coverage_gaps = None
+        freshness_policy = _validate_recent_freshness(
+            series, requested_end, retrieved_at
+        )
     series.name = symbol
     receipt: dict[str, Any] = {
         "provider": "wolfram",
@@ -301,18 +552,27 @@ def normalize_wolfram_envelope(
         "price_basis": price_basis,
         "currency": currency,
         "unit": unit,
+        "unit_evidence": unit_evidence,
         "exchange": exchange,
         "security_type": security_type,
         "sources": sources,
         "observation_count": len(series),
-        "requested_range": {"start": start, "end": end},
+        "requested_range": requested_range,
         "observed_range": {
             "start": series.index.min().isoformat(),
             "end": series.index.max().isoformat(),
         },
         "coverage_status": coverage_status,
+        "coverage_gaps": coverage_gaps,
+        "coverage_policy": "market_calendar_endpoint_tolerance",
+        "endpoint_tolerance_days": HISTORY_ENDPOINT_TOLERANCE_DAYS,
+        "recent_price_freshness": freshness_policy,
         "retrieved_at": retrieved_at,
-        "classification_evidence": dict(classification),
+        "classification_evidence": {
+            **dict(classification),
+            "yahoo_candidate": yahoo_candidate,
+            "wolfram_observed": wolfram_observed,
+        },
         "primary_failure": source.get("primary_failure"),
     }
     return WolframHistory(series=series, currency=currency, receipt=receipt)

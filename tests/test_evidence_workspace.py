@@ -113,7 +113,7 @@ class EvidenceWorkspaceTests(unittest.TestCase):
             issuer="SAP SE",
             observations=[
                 observation("2026-01-05T00:00:00+00:00", 200.0),
-                observation("2026-01-12T00:00:00+00:00", 202.0),
+                observation("2026-01-30T00:00:00+00:00", 202.0),
             ],
         )
 
@@ -148,7 +148,7 @@ class EvidenceWorkspaceTests(unittest.TestCase):
             issuer="SAP SE",
             observations=[
                 observation("2026-01-05T00:00:00+00:00", 200.0),
-                observation("2026-01-12T00:00:00+00:00", 202.0),
+                observation("2026-01-30T00:00:00+00:00", 202.0),
             ],
         )
 
@@ -273,13 +273,13 @@ class EvidenceWorkspaceTests(unittest.TestCase):
             symbol="SAP.DE",
             provider_entity="XETR:SAP",
             currency="EUR",
+            exchange="XETRA",
+            issuer="SAP SE",
             observations=[
                 observation("2026-01-05T00:00:00+00:00", 200.0),
-                observation("2026-01-12T00:00:00+00:00", 202.0),
+                observation("2026-01-30T00:00:00+00:00", 202.0),
             ],
         )
-        envelope["result"]["symbol"] = "SAP.DE"  # type: ignore[index]
-        envelope["result"]["exchange"] = "XETRA"  # type: ignore[index]
         bundle = complete_market_bundle(workspace, [envelope])
 
         self.assertEqual(list(bundle.prices.columns), ["AAPL", "SAP.DE"])
@@ -333,12 +333,13 @@ class EvidenceWorkspaceTests(unittest.TestCase):
             symbol="SAP.DE",
             provider_entity="XETR:SAP",
             currency="EUR",
+            exchange="XETRA",
+            issuer="SAP SE",
             observations=[
                 observation("2026-01-05T00:00:00+00:00", 200.0),
-                observation("2026-01-12T00:00:00+00:00", 202.0),
+                observation("2026-01-30T00:00:00+00:00", 202.0),
             ],
         )
-        wolfram["result"]["exchange"] = "XETRA"  # type: ignore[index]
 
         bundle = complete_market_bundle(
             workspace,
@@ -389,12 +390,13 @@ class EvidenceWorkspaceTests(unittest.TestCase):
             symbol="SAP.DE",
             provider_entity="XETR:SAP",
             currency="EUR",
+            exchange="XETRA",
+            issuer="SAP SE",
             observations=[
                 observation("2026-01-05T00:00:00+00:00", 200.0),
-                observation("2026-01-12T00:00:00+00:00", 202.0),
+                observation("2026-01-30T00:00:00+00:00", 202.0),
             ],
         )
-        wolfram["result"]["exchange"] = "XETRA"  # type: ignore[index]
 
         with self.assertRaisesRegex(DataGateError, "Duplicate fallback inputs"):
             complete_market_bundle(workspace, [alpaca, wolfram])
@@ -452,12 +454,13 @@ class EvidenceWorkspaceTests(unittest.TestCase):
             symbol="SAP.DE",
             provider_entity="XETR:SAP",
             currency="EUR",
+            exchange="XETRA",
+            issuer="SAP SE",
             observations=[
                 observation("2026-01-05T00:00:00+00:00", 200.0),
-                observation("2026-01-12T00:00:00+00:00", 202.0),
+                observation("2026-01-30T00:00:00+00:00", 202.0),
             ],
         )
-        envelope["result"]["exchange"] = "XETRA"  # type: ignore[index]
 
         with self.assertRaisesRegex(DataGateError, "fx_history_unavailable"):
             complete_market_bundle(workspace, [envelope])
