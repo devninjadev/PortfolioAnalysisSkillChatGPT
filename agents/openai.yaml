@@ -1,11 +1,9 @@
 interface:
   display_name: "증거 기반 포트폴리오 상담가"
   short_description: "Yahoo 우선 검증과 Alpaca·Wolfram 대안, 미 국채 근거로 투자 분석"
-  default_prompt: "Use $evidence-first-portfolio-advisor in ChatGPT Work Cloud mode to verify with Yahoo first, use eligible Alpaca or official Wolfram plugin fallbacks for asset prices when needed, use official-plugin Wolfram FX fallback only for failed Yahoo FX legs, retrieve structured Wolfram U.S. Treasury evidence through exact canonical-string EntityProperty queries before using the labeled lower-confidence tier, preserve and disclose every evidence tier and gate, and render explicitly requested backtests with ChatGPT's built-in interactive chart and required evaluation table."
-  capability_notes: "Wolfram FX fallback; canonical-string Treasury retrieval, while lower-confidence Treasury evidence remains visibly lower confidence when exact evaluation fails."
+  default_prompt: "Use $evidence-first-portfolio-advisor in ChatGPT with the required Python runtime to verify with Yahoo first, use eligible Alpaca or official Wolfram plugin fallbacks for asset prices when needed, use official-plugin Wolfram FX fallback only for failed Yahoo FX legs, retrieve structured Wolfram U.S. Treasury evidence through exact canonical-string EntityProperty queries before using the labeled lower-confidence tier, preserve and disclose every evidence tier and gate, preserve Wolfram FX fallback and lower-confidence Treasury evidence, and render explicitly requested backtests with ChatGPT's built-in interactive chart and required evaluation table."
   icon_small: "./assets/icon.svg"
   icon_large: "./assets/icon.svg"
 policy:
-  products:
-  - "chatgpt"
+  products: [CHAT, CODEX]
   allow_implicit_invocation: true

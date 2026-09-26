@@ -91,9 +91,9 @@ Alpaca는 Python 라이브러리가 아니라 ChatGPT가 호출하는 플러그�
 - 미국 주식의 원시 종가는 수익률에 직접 넣지 않는다. 선·역분할은 권리락일 전 가격에 비율을 역적용하고, 현금배당은 이용 가능한 직전 종가로 총수익 가격 계수를 계산한다. 아직 어댑터가 지원하지 않는 비어 있지 않은 기업행동 그룹, 다음 페이지가 남은 응답, 필요한 기업행동 증거 누락, 안전하게 계산할 수 없는 조정은 모두 실패한다.
 - 결과 영수증은 Yahoo의 최초 실패, 최종 공급자, 두 심볼, 분류 근거, Alpaca 도구·피드·주기, 요청/관측 범위, 원시/정규화 관측치 수, 가격 기준, 통화, 적용한 기업행동, 누락 또는 잘린 범위, 조회시각을 보존한다.
 
-미국 주식·크립토 가격 폴백이 실제로 필요하지만 Alpaca 도구가 설치되어 있지 않거나 호출할 수 없으면 `alpaca_plugin_unavailable`을 보고하고 다음 문구를 그대로 보여 준다.
+미국 주식·크립토 가격 폴백에는 기존 Alpaca 다음으로 [Alpaca Paper Trading 계약](alpaca-connector-fallback.md)을 적용한다. 둘 다 필요한 기능을 제공하지 못하면 `alpaca_plugin_unavailable`을 보고한다. 인증과 데이터 권한은 실제 연결 상태로 확인한다.
 
-> 미국 주식·크립토 가격의 대안 출처로 Alpaca 플러그인을 사용할 수 있습니다. 별도 회원가입은 필요 없고, 플러그인을 연결하기만 하면 됩니다.
+Paper Trading은 schema_version 1 봉투에 `connector_id`, `connector_failure`, `paper_calls`를 추가한다. `paper_calls.bars`, 미국 주식의 `asset` 및 `corporate_actions` 각각은 `connector_id`, `tool`, 실제 `arguments`, `retrieved_at`, 수정하지 않은 `response`를 포함한다. `scripts/advisor_data/paper_alpaca.py`만 변환하며 기존 alpaca-validate/complete-portfolio 검증에 연결된다. 미국 주식은 raw/USD/feed와 1Day, 단일 심볼 및 명시적 기간이 필요하다. 비어 있지 않은 기업행동이나 미완료 페이지는 다음 출처로 넘긴다.
 
 이 안내는 Yahoo 가격이 성공한 경우, 한국 주식, 지원하지 않는 시장, 종목이 모호한 경우, 가격과 무관한 요청에는 표시하지 않는다.
 

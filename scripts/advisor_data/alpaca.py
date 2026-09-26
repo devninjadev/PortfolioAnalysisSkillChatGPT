@@ -443,6 +443,12 @@ def normalize_alpaca_envelope(
             "Unsupported Alpaca fallback envelope schema.",
             {"schema_version": source.get("schema_version")},
         )
+    paper_receipts = None
+    if source.get("connector_id") == "asdk_app_6a3cdf9e34b881918505f1cd5e06dbd8":
+        from .paper_alpaca import adapt_paper_envelope
+        source, paper_receipts = adapt_paper_envelope(source)
+    elif "paper_calls" in source:
+        raise DataGateError("alpaca_schema_error", "Unknown Paper connector identity.", {})
     symbol = _required_text(source, "symbol")
     provider_symbol = _required_text(source, "provider_symbol")
     fallback_class = _validate_class(source)
@@ -525,6 +531,11 @@ def normalize_alpaca_envelope(
         "requested_end": end,
         "retrieved_at": retrieved_at,
     }
+    if paper_receipts is not None:
+        receipt["connector_id"] = source["connector_id"]
+        receipt["connector_name"] = "Alpaca Paper Trading"
+        receipt["connector_failure"] = source["connector_failure"]
+        receipt["paper_calls"] = paper_receipts
     if asset_receipt is not None:
         receipt["asset"] = asset_receipt
         receipt["corporate_actions_request"] = actions_request_receipt

@@ -3,6 +3,9 @@ name: evidence-first-portfolio-advisor
 description: Use in ChatGPT Work Cloud mode when analyzing listed equities, ETFs, or cryptoassets; resolving a security name to a Yahoo ticker; verifying prices, fundamentals, valuation, or news; constructing evidence-backed multi-asset portfolio candidates; or fulfilling an explicit backtest request.
 ---
 
+Before any Alpaca-dependent step, read [Alpaca connector fallback](references/alpaca-connector-fallback.md). Try original Alpaca first, then Alpaca Paper Trading read-only market data for an unavailable or failed capability; preserve the existing provider order and evidence gates.
+
+
 # Evidence-First Portfolio Advisor
 
 Give conditional investment counseling from retrieved evidence. Never turn missing data into a confident opinion, weight, price claim, or trade instruction.
